@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+#export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	sh -c "\
+		mkdir -p debian/truenas-audit-rules/conf/audit_rules/; \
+		cp -a rules/* debian/truenas-audit-rules/conf/audit_rules/; \
+	"
+
+override_dh_fixperms:
+
+override_dh_shlibdeps:
+
+override_dh_usrlocal:

@@ -1,0 +1,143 @@
+## The purpose of these rules is to meet the stig auditing requirements
+## These rules depends on having 10-base-config.rules & 99-finalize.rules
+## installed.
+
+## NOTE:
+## 1) You can search for the results on the key fields in the rules
+## 2) UID > 900 is logged in many cases because the truenas_admin account
+##    defaults to UID 950
+## 3) Presently many configuration files are modified by UID 0 via middlewared
+##    process and so we don't audit those.
+##
+## Things that could affect time
+-a always,exit -F arch=b32 -S adjtimex,settimeofday,stime -F key=time-change
+-a always,exit -F arch=b64 -S adjtimex,settimeofday -F key=time-change
+-a always,exit -F arch=b32 -S clock_settime -F a0=0x0 -F key=time-change
+-a always,exit -F arch=b64 -S clock_settime -F a0=0x0 -F key=time-change
+-a always,exit -F arch=b32 -F path=/etc/localtime -F perm=wa -F key=time-change
+-a always,exit -F arch=b64 -F path=/etc/localtime -F perm=wa -F key=time-change
+
+## Things that affect identity
+-a always,exit -F arch=b32 -F path=/etc/group -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/group -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/passwd -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/passwd -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/gshadow -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/gshadow -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/shadow -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/shadow -F perm=wa -F auid>0 -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/security/opasswd -F auid>0 -F perm=wa -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/security/opasswd -F auid>0 -F perm=wa -F key=identity
+
+## Things that could affect system locale
+-a always,exit -F arch=b32 -S sethostname,setdomainname -F key=system-locale
+-a always,exit -F arch=b64 -S sethostname,setdomainname -F key=system-locale
+-a always,exit -F arch=b32 -F path=/etc/issue -F perm=wa -F key=system-locale
+-a always,exit -F arch=b64 -F path=/etc/issue -F perm=wa -F key=system-locale
+-a always,exit -F arch=b32 -F path=/etc/issue.net -F perm=wa -F key=system-locale
+-a always,exit -F arch=b64 -F path=/etc/issue.net -F perm=wa -F key=system-locale
+-a always,exit -F arch=b32 -F path=/etc/hosts -F perm=wa -F key=system-locale
+-a always,exit -F arch=b64 -F path=/etc/hosts -F perm=wa -F key=system-locale
+-a always,exit -F arch=b32 -F path=/etc/hostname -F perm=wa -F key=system-locale
+-a always,exit -F arch=b64 -F path=/etc/hostname -F perm=wa -F key=system-locale
+-a always,exit -F arch=b32 -F dir=/etc/NetworkManager/ -F perm=wa -F key=system-locale
+-a always,exit -F arch=b64 -F dir=/etc/NetworkManager/ -F perm=wa -F key=system-locale
+
+## Things that could affect MAC policy
+-a always,exit -F arch=b32 -F dir=/etc/selinux/ -F perm=wa -F key=MAC-policy
+-a always,exit -F arch=b64 -F dir=/etc/selinux/ -F perm=wa -F key=MAC-policy
+
+
+## (GEN002900: CAT III) The IAO will ensure audit files are retained at
+## least one year; systems containing SAMI will be retained for five years.
+##
+## Site action - no action in config files
+
+## (GEN002920: CAT III) The IAO will ensure audit files are backed up
+## no less than weekly onto a different system than the system being
+## audited or backup media.
+##
+## Can be done with cron script
+
+## (GEN002700: CAT I) (Previously – G095) The SA will ensure audit data
+## files have permissions of 640, or more restrictive.
+##
+## Done automatically by auditd
+
+## (GEN002720-GEN002840: CAT II) (Previously – G100-G106) The SA will
+## configure the auditing system to audit the following events for all
+## users and root:
+##
+## - Logon (unsuccessful and successful) and logout (successful)
+##
+## Handled by pam, sshd, login, and gdm
+## Might also want to watch these files if needing extra information
+#-a always,exit -F arch=b32 -F path=/var/log/tallylog -F perm=wa -F key=logins
+#-a always,exit -F arch=b64 -F path=/var/log/tallylog -F perm=wa -F key=logins
+#-a always,exit -F arch=b32 -F path=/var/run/faillock -F perm=wa -F key=logins
+#-a always,exit -F arch=b64 -F path=/var/run/faillock -F perm=wa -F key=logins
+#-a always,exit -F arch=b32 -F path=/var/log/lastlog -F perm=wa -F key=logins
+#-a always,exit -F arch=b64 -F path=/var/log/lastlog -F perm=wa -F key=logins
+
+
+##- Process and session initiation (unsuccessful and successful)
+##
+## The session initiation is audited by pam without any rules needed.
+## Might also want to watch this file if needing extra information
+#-a always,exit -F arch=b32 -F path=/var/run/utmp -F perm=wa -F key=session
+#-a always,exit -F arch=b64 -F path=/var/run/utmp -F perm=wa -F key=session
+#-a always,exit -F arch=b32 -F path=/var/log/btmp -F perm=wa -F key=session
+#-a always,exit -F arch=b64 -F path=/var/log/btmp -F perm=wa -F key=session
+#-a always,exit -F arch=b32 -F path=/var/log/wtmp -F perm=wa -F key=session
+#-a always,exit -F arch=b64 -F path=/var/log/wtmp -F perm=wa -F key=session
+
+##- Discretionary access control permission modification (unsuccessful
+## and successful use of chown/chmod)
+#-a always,exit -F arch=b32 -S chmod,fchmod,fchmodat -F auid>=900 -F auid!=unset -F key=perm_mod
+#-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F auid>=900 -F auid!=unset -F key=perm_mod
+#-a always,exit -F arch=b32 -S lchown,fchown,chown,fchownat -F auid>=900 -F auid!=unset -F key=perm_mod
+#-a always,exit -F arch=b64 -S chown,fchown,lchown,fchownat -F auid>=900 -F auid!=unset -F key=perm_mod
+#-a always,exit -F arch=b32 -S setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr -F auid>=900 -F auid!=unset -F key=perm_mod
+#-a always,exit -F arch=b64 -S setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr -F auid>=900 -F auid!=unset -F key=perm_mod
+
+##- Unauthorized access attempts to files (unsuccessful)
+#-a always,exit -F arch=b32 -S open,creat,truncate,ftruncate,openat,openat2,open_by_handle_at -F exit=-EACCES -F auid>=900 -F auid!=unset -F key=access
+#-a always,exit -F arch=b32 -S open,creat,truncate,ftruncate,openat,openat2,open_by_handle_at -F exit=-EPERM -F auid>=900 -F auid!=unset -F key=access
+#-a always,exit -F arch=b64 -S open,truncate,ftruncate,creat,openat,openat2,open_by_handle_at -F exit=-EACCES -F auid>=900 -F auid!=unset -F key=access
+#-a always,exit -F arch=b64 -S open,truncate,ftruncate,creat,openat,openat2,open_by_handle_at -F exit=-EPERM -F auid>=900 -F auid!=unset -F key=access
+
+##- Export to media (successful)
+## You have to mount media before using it. You must disable all automounting
+## so that its done manually in order to get the correct user requesting the
+## export
+-a always,exit -F arch=b32 -S mount -F auid>=900 -F auid!=unset -F key=export
+-a always,exit -F arch=b64 -S mount -F auid>=900 -F auid!=unset -F key=export
+
+##- System startup and shutdown (unsuccessful and successful)
+
+##- Files and programs deleted by the user (successful and unsuccessful)
+-a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat -F auid>=900 -F auid!=unset -F key=delete
+-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=900 -F auid!=unset -F key=delete
+
+##- All system administration actions
+##- All security personnel actions
+##
+## Look for pam_tty_audit and add it to your login entry point's pam configs.
+## If that is not found, use sudo which should be patched to record its
+## commands to the audit system. Do not allow unrestricted root shells or
+## sudo cannot record the action.
+-a always,exit -F arch=b32 -F path=/etc/sudoers -F perm=wa -F key=actions
+-a always,exit -F arch=b64 -F path=/etc/sudoers -F perm=wa -F key=actions
+-a always,exit -F arch=b32 -F dir=/etc/sudoers.d/ -F perm=wa -F key=actions
+-a always,exit -F arch=b64 -F dir=/etc/sudoers.d/ -F perm=wa -F key=actions
+
+## Special case for systemd-run. It is not audit aware, specifically watch it
+-a always,exit -F arch=b32 -F path=/usr/bin/systemd-run -F perm=x -F auid!=unset -F key=maybe-escalation
+-a always,exit -F arch=b64 -F path=/usr/bin/systemd-run -F perm=x -F auid!=unset -F key=maybe-escalation
+
+## Always audit call to disable rootfs protection
+-a always,exit -F arch=b64 -F path=/usr/local/libexec/disable-rootfs-protection -F perm=x -F auid!=unset -F key=maybe-escalation
+
+## ZFS-related binares can also be used to bypass system protections.
+-a always,exit -F arch=b64 -F path=/sbin/zfs -F perm=x -F auid>0 -F key=maybe-escalation
+-a always,exit -F arch=b64 -F path=/sbin/zpool -F perm=x -F auid>0 -F key=maybe-escalation

@@ -1,0 +1,13 @@
+Source: truenas-audit-rules
+Section: admin
+Priority: optional
+Maintainer: Andrew Walker <awalker@ixsystems.com>
+Build-Depends: debhelper-compat (= 12)
+Standards-Version: 4.4.0
+Homepage: http://www.truenas.com
+
+Package: truenas-audit-rules
+Architecture: any
+Depends: truenas-files, ${misc:Depends}, ${shlibs:Depends}
+Description: Auditd rules for TrueNAS when STIG compatibiliy mode
+ enabled.
