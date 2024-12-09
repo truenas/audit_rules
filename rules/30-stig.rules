@@ -40,8 +40,6 @@
 -a always,exit -F arch=b64 -F path=/etc/hosts -F perm=wa -F key=system-locale
 -a always,exit -F arch=b32 -F path=/etc/hostname -F perm=wa -F key=system-locale
 -a always,exit -F arch=b64 -F path=/etc/hostname -F perm=wa -F key=system-locale
--a always,exit -F arch=b32 -F dir=/etc/NetworkManager/ -F perm=wa -F key=system-locale
--a always,exit -F arch=b64 -F dir=/etc/NetworkManager/ -F perm=wa -F key=system-locale
 
 ## Things that could affect MAC policy
 -a always,exit -F arch=b32 -F dir=/etc/selinux/ -F perm=wa -F key=MAC-policy
@@ -136,7 +134,7 @@
 -a always,exit -F arch=b64 -F path=/usr/bin/systemd-run -F perm=x -F auid!=unset -F key=maybe-escalation
 
 ## Always audit call to disable rootfs protection
--a always,exit -F arch=b64 -F path=/usr/local/libexec/disable-rootfs-protection -F perm=x -F auid!=unset -F key=maybe-escalation
+-a always,exit -F arch=b64 -F path=/usr/local/libexec/disable-rootfs-protection -F perm=x -F key=maybe-escalation
 
 ## ZFS-related binares can also be used to bypass system protections.
 -a always,exit -F arch=b64 -F path=/sbin/zfs -F perm=x -F auid>0 -F key=maybe-escalation
