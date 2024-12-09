@@ -21,30 +21,37 @@ def file_has_setuid_bit(target: str) -> bool:
     return stat(target).st_mode & S_ISUID
 
 
-def audit_entry_string(target: str, arch: str) -> str:
+def __strip_prefix(target: str, prefix: str) -> str:
+    return target[len(prefix):]
+
+
+def audit_entry_string(target: str, arch: str, prefix: str) -> str:
     return (
         '-a always,exit '
         f'-F arch={arch} '
-        f'-F path={target} '
+        f'-F path={__strip_prefix(target, prefix)} '
         '-F perm=x '
         f'-F auid>={USER_ID_MIN} -F auid!=unset '
         '-F key=privileged\n'
     )
 
 
-def write_audit_entry(target: str, fh: TextIOWrapper) -> None:
-    fh.write(audit_entry_string(target, ARCH64))
-    fh.write(audit_entry_string(target, ARCH32))
+def write_audit_entry(target: str, fh: TextIOWrapper, prefix: str) -> None:
+    fh.write(audit_entry_string(target, ARCH64, prefix))
+    fh.write(audit_entry_string(target, ARCH32, prefix))
 
 
-def generate_audit_privilege(target_dir: str, privilege_file: str) -> None:
+def generate_audit_privilege(target_dir: str, privilege_file: str, prefix: str) -> None:
+    if prefix and not target_dir.startswith(prefix):
+        raise ValueError(f'{target_dir}: target_dir does not start with prefix [{prefix}]')
+
     with open(privilege_file, 'w') as f:
         for root, dirs, files in walk(target_dir):
             for name in files:
                 target = path.join(root, name)
                 try:
                     if file_has_setuid_bit(target) or file_has_capability(target):
-                        write_audit_entry(target, f)
+                        write_audit_entry(target, f, prefix)
                 except FileNotFoundError:
                     # possibly broken symlink
                     pass
@@ -62,9 +69,15 @@ def main():
        '-p', '--privilege_file',
        help='File in which to write privilege rules.'
     )
+    parser.add_argument(
+       '-x', '--prefix',
+       help='File in which to write privilege rules.',
+       default=''
+    )
 
     args = parser.parse_args()
-    generate_audit_privilege(args.target_dir, args.privilege_file)
+
+    generate_audit_privilege(args.target_dir, args.privilege_file, args.prefix)
 
 
 if __name__ == '__main__':
