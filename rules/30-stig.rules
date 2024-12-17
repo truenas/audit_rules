@@ -18,16 +18,16 @@
 -a always,exit -F arch=b64 -F path=/etc/localtime -F perm=wa -F key=time-change
 
 ## Things that affect identity
--a always,exit -F arch=b32 -F path=/etc/group -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b64 -F path=/etc/group -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b32 -F path=/etc/passwd -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b64 -F path=/etc/passwd -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b32 -F path=/etc/gshadow -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b64 -F path=/etc/gshadow -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b32 -F path=/etc/shadow -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b64 -F path=/etc/shadow -F perm=wa -F auid>0 -F key=identity
--a always,exit -F arch=b32 -F path=/etc/security/opasswd -F auid>0 -F perm=wa -F key=identity
--a always,exit -F arch=b64 -F path=/etc/security/opasswd -F auid>0 -F perm=wa -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/group -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/group -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/passwd -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/passwd -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/gshadow -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/gshadow -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/shadow -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/shadow -F perm=wa -F auid!=unset -F key=identity
+-a always,exit -F arch=b32 -F path=/etc/security/opasswd -F auid!=unset -F perm=wa -F key=identity
+-a always,exit -F arch=b64 -F path=/etc/security/opasswd -F auid!=unset -F perm=wa -F key=identity
 
 ## Things that could affect system locale
 -a always,exit -F arch=b32 -S sethostname,setdomainname -F key=system-locale
@@ -108,14 +108,14 @@
 ## You have to mount media before using it. You must disable all automounting
 ## so that its done manually in order to get the correct user requesting the
 ## export
--a always,exit -F arch=b32 -S mount -F auid>=900 -F auid!=unset -F key=export
--a always,exit -F arch=b64 -S mount -F auid>=900 -F auid!=unset -F key=export
+-a always,exit -F arch=b32 -S mount -F auid!=unset -F key=export
+-a always,exit -F arch=b64 -S mount -F auid!=unset -F key=export
 
 ##- System startup and shutdown (unsuccessful and successful)
 
 ##- Files and programs deleted by the user (successful and unsuccessful)
--a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat -F auid>=900 -F auid!=unset -F key=delete
--a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=900 -F auid!=unset -F key=delete
+#-a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat -F auid>900 -F auid!=unset -F key=delete
+#-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>900 -F auid!=unset -F key=delete
 
 ##- All system administration actions
 ##- All security personnel actions
@@ -124,18 +124,24 @@
 ## If that is not found, use sudo which should be patched to record its
 ## commands to the audit system. Do not allow unrestricted root shells or
 ## sudo cannot record the action.
--a always,exit -F arch=b32 -F path=/etc/sudoers -F perm=wa -F key=actions
--a always,exit -F arch=b64 -F path=/etc/sudoers -F perm=wa -F key=actions
--a always,exit -F arch=b32 -F dir=/etc/sudoers.d/ -F perm=wa -F key=actions
--a always,exit -F arch=b64 -F dir=/etc/sudoers.d/ -F perm=wa -F key=actions
+-a always,exit -F arch=b32 -F path=/etc/sudoers -F perm=wa -F key=escalation
+-a always,exit -F arch=b64 -F path=/etc/sudoers -F perm=wa -F key=escalation
+-a always,exit -F arch=b32 -F dir=/etc/sudoers.d/ -F perm=wa -F key=escalation
+-a always,exit -F arch=b64 -F dir=/etc/sudoers.d/ -F perm=wa -F key=escalation
 
 ## Special case for systemd-run. It is not audit aware, specifically watch it
--a always,exit -F arch=b32 -F path=/usr/bin/systemd-run -F perm=x -F auid!=unset -F key=maybe-escalation
--a always,exit -F arch=b64 -F path=/usr/bin/systemd-run -F perm=x -F auid!=unset -F key=maybe-escalation
+-a always,exit -F arch=b32 -F path=/usr/bin/systemd-run -F perm=x -F auid!=unset -F key=escalation
+-a always,exit -F arch=b64 -F path=/usr/bin/systemd-run -F perm=x -F auid!=unset -F key=escalation
 
 ## Always audit call to disable rootfs protection
--a always,exit -F arch=b64 -F path=/usr/local/libexec/disable-rootfs-protection -F perm=x -F key=maybe-escalation
+-a always,exit -F arch=b64 -F path=/usr/local/libexec/disable-rootfs-protection -F perm=x -F key=escalation
 
 ## ZFS-related binares can also be used to bypass system protections.
--a always,exit -F arch=b64 -F path=/sbin/zfs -F perm=x -F auid>0 -F key=maybe-escalation
--a always,exit -F arch=b64 -F path=/sbin/zpool -F perm=x -F auid>0 -F key=maybe-escalation
+-a always,exit -F arch=b64 -F path=/sbin/zfs -F perm=x -F auid!=unset -F key=escalation
+-a always,exit -F arch=b64 -F path=/sbin/zpool -F perm=x -F auid!=unset -F key=escalation
+
+## TrueNAS configuration
+-a always,exit -F arch=b64 -F path=/data/freenas-v1.db -F perm=r -F auid!=unset -F key=escalation
+-a always,exit -F arch=b64 -F path=/data/pwenc_secret -F perm=r -F auid!=unset -F key=escalation
+-a always,exit -F arch=b64 -F path=/var/db/system -F perm=r -F auid!=unset -F key=escalation
+-a always,exit -F arch=b64 -F path=/var/run/samba-cache -F perm=r -F auid!=unset -F key=escalation
