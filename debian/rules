@@ -8,6 +8,12 @@ override_dh_auto_install:
 	sh -c "\
 		mkdir -p debian/truenas-audit-rules/conf/audit_rules/; \
 		cp -a rules/* debian/truenas-audit-rules/conf/audit_rules/; \
+		mkdir -p debian/truenas-audit-rules/conf/audit_plugins/; \
+		cp -a plugins/* debian/truenas-audit-rules/conf/audit_plugins/; \
+		mkdir -p debian/truenas-audit-rules/usr/local/libexec/; \
+		cp -a scripts/* debian/truenas-audit-rules/usr/local/libexec/; \
+		mkdir -p debian/truenas-audit-rules/lib/systemd/system/; \
+		cp -a systemd/* debian/truenas-audit-rules/lib/systemd/system/; \
 	"
 
 override_dh_fixperms:

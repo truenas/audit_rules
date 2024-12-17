@@ -8,6 +8,6 @@ Homepage: http://www.truenas.com
 
 Package: truenas-audit-rules
 Architecture: any
-Depends: truenas-files, ${misc:Depends}, ${shlibs:Depends}
+Depends: python3:any, truenas-files, ${misc:Depends}, ${shlibs:Depends}
 Description: Auditd rules for TrueNAS when STIG compatibiliy mode
  enabled.
