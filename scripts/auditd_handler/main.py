@@ -107,14 +107,13 @@ def __validate_args(args: argparse.Namespace):
     __validate_socket_path(args.audit_socket)
 
 
-async def main():
-    loop = asyncio.get_running_loop()
+def main():
+    loop = asyncio.get_event_loop()
     args = __process_args()
-    await loop.run_in_executor(None, __validate_args, args)
+    __validate_args(args)
     handler = AuditdHandler(args.audit_socket, loop)
-    await handler.run()
+    loop.run_until_complete(handler.run())
 
 
 if __name__ == 'main':
-     loop = asyncio.get_event_loop()
-     loop.run_until_complete(main())
+    main()
