@@ -1,0 +1,375 @@
+import argparse
+import asyncio
+import enum
+import logging
+import os
+import stat
+
+from codecs import decode
+from dataclasses import dataclass
+from datetime import datetime
+from collections import defaultdict, deque
+from syslog import openlog, syslog
+
+
+DESCRIPTION = (
+    'Process audit messages in real time from the auditd dispatch unix domain '
+    'socket and write them to the syslog-ng handler, and if required raise '
+    'middlewared alerts for high priority items.'
+)
+
+DEFAULT_AUDISPD_SOCK = '/var/run/audispd_events'
+SYSLOG_IDENT = 'TNAUDIT_SYSTEM'
+
+AUDITD_LINE_SEPARATOR = '\x1d'
+
+
+class AuditMsgParser(enum.Enum):
+    @property
+    def idx(self) -> int:
+        return self.value[0]
+
+    @property
+    def data_type(self) -> type:
+        return self.value[1]
+
+    def get_entry(self, data: list[str]) -> tuple:
+        key, value = data[self.idx].split('=', 1)
+        if self.data_type is str:
+            # possibly strip leading and trailing quotes
+            if value[0] == '"'
+                value = value[1:]
+            if value[-1] == '"':
+                value = value[0:-1]
+
+            return (key, value)
+
+        elif self.data_type is bool:
+            return (key, value == "yes")
+
+        return (key, int(value))
+        
+
+class AuditMsgBase(AuditMsgParser):
+    TYPE = (0, str)
+    ID = (1, str) 
+
+    def get_entry(self, data: list[str]) -> tuple:
+        if self is AuditBaseMsg.TYPE:
+            return super().get_entry(data)
+
+        key, value = data[self.idx].split('=', 1)
+        # ID has a trailing colon ":" that needs to be stripped
+        return (key, value[0: -1])
+
+
+def get_msg_type(data: list[str]) -> str:
+    key, value = AuditMsgBase.TYPE.get_entry(data)
+    return value
+
+
+def get_msg_id(data: list[str]) -> str:
+    key, value = AuditMsgBase.ID.get_entry(data)
+    return value
+
+
+class AuditMsgPath(AuditMsgParser):
+    ITEM_NO = (2, int)
+    NAME = (3, str)
+    INODE = (4, int)
+    DEV = (5, str)
+    MODE = (6, int)
+    OUID = (7, int)
+    OGID = (8, int)
+    RDEV = (9, str)
+    NAMETYPE = (10, str)
+
+
+class AuditMsgProctitle(AuditMsgParser):
+    PROCTITLE = (2, str):
+
+    def get_entry(self, data: list[str]) -> tuple:
+        key, value = super().get_entry(data)
+        proc = decode(value, 'hex').decode().replace('\x00', ' ') 
+        return (key, proc)
+
+
+class AuditMsgCwd(AuditMsgParser):
+    CWD = (2, str)
+
+
+class AuditMsgSyscall(AuditMsgParser):
+    SUCCESS = (4, bool)
+    EXIT = (5, int)
+    PPID = (11, int)
+    PID = (12, int)
+    AUID = (13, int)
+    UID = (14, int)
+    GID = (15, int)
+    EUID = (16, int)
+    SUID = (17, int)
+    FSUID = (18, int)
+    EGID = (19, int)
+    SGID = (20, int)
+    FSGID = (21, int)
+    TTY = (22, str)
+    SES = (23, int)
+    KEY = (27, str)
+    SYSCALL_STR = (29, str)
+    AUID_STR = (30, str)
+    UID_STR = (31, str)
+    GID_STR = (32, str)
+
+
+class AuditMsgEventType(enum.StrEnum):
+    PROCTITLE = 'PROCTITLE'
+    PATH = 'PATH'
+    CWD = 'CWD'
+    EXECVE = 'EXECVE'
+    SYSCALL = 'SYSCALL'
+    CONFIG_CHANGE = 'CONFIG_CHANGE'
+    EOE = 'EOE'
+    BPF = 'BPF'
+
+
+class AuditEvent(enum.StrEnum):
+    PRIVILEGED = 'privileged'
+    ESCALATION = 'escalation'
+    EXPORT = 'export'
+    IDENTITY = 'identity'
+    TIMECHANGE = 'time-change'
+    MODULE = 'module-load'
+    GENERIC = 'generic'
+
+
+@dataclass(slots=True)
+class AUDITEntry:
+    event_type: AuditEvent | None = None
+    key_event: str | None = None
+    raw_lines: list[str] = field(default_factory=list)
+
+
+MULTIPART_EVENT = frozenset([
+    AuditMsgEventType.PROCTITLE,
+    AuditMsgEventType.PATH,
+    AuditMsgEventType.CWD,
+    AuditMsgEventType.EXECVE,
+    AuditMsgEventType.SYSCALL,
+    AuditMsgEventType.CONFIG_CHANGE,
+    AuditMsgEventType.EOE,
+    AuditMsgEventType.BPF,
+])
+
+
+def __parse_cwd(msg_parts: list, event_data: dict) -> None:
+    key, cwd = AuditMsgCwd.CWD.get_entry(msg_parts)
+    event_data['cwd'] = cwd
+
+
+def __parse_path(msg_parts: list, paths: list) -> None:
+    path_entry = {}
+
+    # deliberately leave off the item number from the line since it
+    # can be inferred from array index.
+    for item in AuditMsgPath:
+        key, value = item.get_entry(msg_parts)
+        path_entry[key] = value
+
+    paths.append(path_entry)
+
+
+def __parse_proctitle(msg_parts: list, event_data: dict) -> None:
+    key, proctitle = AuditMsgProctitle.PROCTITLE.get_entry(msg_parts)
+    event_data['proctitle'] = proctitle
+
+
+def __parse_syscall(msg_parts: list, event_data: dict) -> None:
+    if event_data['syscall'] is not None:
+        return
+
+    event_data['syscall'] = {}
+
+    for item in AuditMsgSyscal:
+        key, value = item.get_entry(msg_parts)
+        event_data['syscall'][key] = value
+
+
+def __parse_raw_msg(msg: str, event_data: dict):
+    # We can include inferred items in our entry
+    parts = msg.split()
+    key, msgctype
+    match get_msg_type(parts):
+        case 'PATH':
+            return __parse_path(parts, event_data['paths'])
+        case 'PROCTITLE':
+            return __parse_proctitle(parts, event_data)
+        case 'CWD':
+            return __parse_cwd(parts, event_data)
+        case 'SYSCALL':
+            return __parse_syscall(parts, event_data)
+        case _:
+            pass
+
+
+def __generate_event_data(
+    entry: AUDITEntry,
+    data_out: dict
+) -> None:
+
+    data_out['event'] = data_out['event'].upper()
+
+    if entry.key_event:
+        key, user = AuditMsgSyscall.UID_STR.get_entry(entry.key_event)
+        data_out['user'] = user
+
+        key, success = AuditMsgSyscall.SUCCESS.get_entry(entry.key_event)
+        data_out['success'] = success
+
+    for item in entry.raw_lines:
+        __parse_raw_msg(item, data_out['event_data'])
+
+
+def __parse_msgid(msgid: str, entry_data: dict):
+    """
+    msgid is string such as audit(1734419821.939:3615). The part before the `:`
+    character is a timestamp and the part after it is the audit event id.
+    We need to convert this string into a UUID for the audit event.
+
+    Unfortunately the audit event id is only an unsigned int, and so it's not
+    actually universally unique and potentialy not unique over time.
+
+    We convert this into a UUID by moving the timestamp to upper 64 bits of a
+    128 bit integer, using the audit event id as the bottom 32 bits, and then
+    placing random 32 bits in the middle of it.
+    """
+    msgid = msgid.split('(')[1].strip(')')
+    timestamp, eventid = msgid.split(':')
+    ts_datetime = datetime.fromtimestamp(float(timestamp))
+
+    upper_64 = int(timestamp.replace('.', '')) << 64
+    lower_32 = int(eventid)
+    mid_32 = getrandbits(32) << 32
+
+    entry_data['time'] = ts_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')
+    entry_data['aid'] = str(UUID(int=upper_64 + lower_32 + mid_32))
+
+
+def audit_entry_to_json(msgid: str, entry: AUDITEntry) -> str:
+    to_write = {'TNAUDIT': {
+        'aid': None,
+        'vers': {'major': 0, 'minor': 1},
+        'addr': '127.0.0.1',
+        'user': None,
+        'sess': None,
+        'time': None,
+        'svc': 'SYSTEM_AUDIT',
+        'svc_data': None,  # per our NEP None is OK here
+        'event': entry.event_type or AuditEvent.GENERIC,
+        'event_data': {
+            'audit_msg_id_str': msgid,
+            'proctitle': None,
+            'syscall': None,
+            'cwd': None,
+            'paths': [],
+            'raw_lines': entry.raw_lines
+        },
+        'success': True
+    }}
+
+    __parse_msgid(msgid, to_write['TNAUDIT'])
+    __generate_event_data(entry, to_write['TNAUDIT'])
+
+    return '@cee:' + dumps(to_write)
+
+
+class AuditdHandler:
+    def __init__(self, audis_sock: str, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        self.audis_path = audis_sock
+        self.audis_reader = None
+        self.audis_writer = None
+        self.partial_records = defaultdict(AUDITEntry)
+        self.alerts_queue = deque()  # Queue for alerts to send to middlewared process
+
+    async def __setup_reader(self) -> None:
+        r, w = await asyncio.open_unix_connection(path=self.audis_path)
+        self.audis_reader = r
+        self.audis_writer = w
+
+    async def send_completed(self, msgid: str, data: AUDITEntry) -> None:
+        json_data = audit_entry_to_json(msgid, data)
+        await self.loop.run_in_executor(None, syslog, json_data)
+
+    async def parse_audit_line(self, line: bytes):
+        # decode and strip off trailing newline character
+        decoded = line.decode()[0:-1]
+        if not decoded:
+            return
+
+        decoded = decoded.replace(AUDITD_LINE_SEPARATOR, ' ')
+
+        parts = decoded.split()
+        msgid = get_msg_id(parts)
+        msgtype = get_msg_type(parts)
+
+        if not msgtype in MULTIPART_EVENT:
+            # TODO add handling
+            return None
+
+        # Keep adding to raw_lines until we get an End of Event (EOE) message.
+        entry = self.partial_records[msgid]
+        entry.raw_lines.append(decoded)
+
+        # prioritize line with the identifier key
+        if (audit_event := get_audit_event(parts)) is not None:
+            entry.event_type = audit_event
+            entry.key_event = parts
+
+        if msgtype != AuditMsgEventType.EOE:
+            # Incomplete message. Cache it up.
+            return None
+
+        return (msgid, self.partial_records.pop(msgid))
+
+    async def handle_auditd_msg(self):
+        data = await self.audis_reader.readline()
+        if (completed := await self.parse_audit_line(data)) is not None:
+            await self.send_completed(*completed)
+
+    async def run(self):
+        await self.__setup_reader()
+        await self.loop.run_in_executor(None, openlog, SYSLOG_IDENT)
+
+        while True:
+            await self.handle_auditd_msg()
+
+
+def __process_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
+    parser.add_argument(
+        '-a', '--audit-socket',
+        help='Path to audispd-af_unix socket.',
+        default=DEFAULT_AUDISPD_SOCK
+    )
+    return parser.parse_args()
+
+
+def __validate_socket_path(path: str):
+    if not stat.S_ISSOCK(os.stat(path).st_mode):
+        raise RuntimeError(f'{path}: not a socket.')
+
+
+def __validate_args(args: argparse.Namespace):
+    __validate_socket_path(args.audit_socket)
+
+
+def main():
+    loop = asyncio.get_event_loop()
+    args = __process_args()
+    __validate_args(args)
+    handler = AuditdHandler(args.audit_socket, loop)
+    loop.run_until_complete(handler.run())
+
+
+if __name__ == 'main':
+    main()
