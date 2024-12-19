@@ -77,7 +77,6 @@ def get_msg_id(data: list[str]) -> str:
 
 
 class AuditMsgPath(AuditMsgParser):
-    ITEM_NO = (2, int)
     NAME = (3, str)
     INODE = (4, int)
     DEV = (5, str)
@@ -85,7 +84,6 @@ class AuditMsgPath(AuditMsgParser):
     OUID = (7, int)
     OGID = (8, int)
     RDEV = (9, str)
-    NAMETYPE = (10, str)
 
 
 class AuditMsgProctitle(AuditMsgParser):
@@ -231,6 +229,7 @@ def __generate_event_data(
 ) -> None:
 
     data_out['event'] = data_out['event'].upper()
+    raw_lines = entry.raw_lines
 
     if entry.key_event:
         key, user = AuditMsgSyscall.UID_STR.get_entry(entry.key_event)
@@ -238,8 +237,9 @@ def __generate_event_data(
 
         key, success = AuditMsgSyscall.SUCCESS.get_entry(entry.key_event)
         data_out['success'] = success
+        data_out['event_data']['raw_lines'] = None
 
-    for item in entry.raw_lines:
+    for item in raw_lines:
         __parse_raw_msg(item, data_out['event_data'])
 
 
@@ -385,5 +385,5 @@ def main():
     loop.run_until_complete(handler.run())
 
 
-if __name__ == 'main':
+if __name__ == '__main__':
     main()
