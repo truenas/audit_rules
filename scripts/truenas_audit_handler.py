@@ -6,10 +6,13 @@ import os
 import stat
 
 from codecs import decode
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from collections import defaultdict, deque
+from json import dumps
+from random import getrandbits
 from syslog import openlog, syslog
+from uuid import UUID
 
 
 DESCRIPTION = (
@@ -37,7 +40,7 @@ class AuditMsgParser(enum.Enum):
         key, value = data[self.idx].split('=', 1)
         if self.data_type is str:
             # possibly strip leading and trailing quotes
-            if value[0] == '"'
+            if value[0] == '"':
                 value = value[1:]
             if value[-1] == '"':
                 value = value[0:-1]
@@ -48,14 +51,14 @@ class AuditMsgParser(enum.Enum):
             return (key, value == "yes")
 
         return (key, int(value))
-        
+
 
 class AuditMsgBase(AuditMsgParser):
     TYPE = (0, str)
-    ID = (1, str) 
+    ID = (1, str)
 
     def get_entry(self, data: list[str]) -> tuple:
-        if self is AuditBaseMsg.TYPE:
+        if self is AuditMsgBase.TYPE:
             return super().get_entry(data)
 
         key, value = data[self.idx].split('=', 1)
@@ -86,11 +89,11 @@ class AuditMsgPath(AuditMsgParser):
 
 
 class AuditMsgProctitle(AuditMsgParser):
-    PROCTITLE = (2, str):
+    PROCTITLE = (2, str)
 
     def get_entry(self, data: list[str]) -> tuple:
         key, value = super().get_entry(data)
-        proc = decode(value, 'hex').decode().replace('\x00', ' ') 
+        proc = decode(value, 'hex').decode().replace('\x00', ' ')
         return (key, proc)
 
 
@@ -142,6 +145,18 @@ class AuditEvent(enum.StrEnum):
     GENERIC = 'generic'
 
 
+def get_audit_event(parts: list[str]) -> AuditEvent | None:
+    # only syscall events will have the key loaded
+    if get_msg_type(parts) != 'SYSCALL':
+        return None
+
+    key, value = AuditMsgSyscall.KEY.get_entry(parts)
+    if value == '(null)':
+        return AuditEvent.GENERIC
+
+    return AuditEvent(value)
+
+
 @dataclass(slots=True)
 class AUDITEntry:
     event_type: AuditEvent | None = None
@@ -189,7 +204,7 @@ def __parse_syscall(msg_parts: list, event_data: dict) -> None:
 
     event_data['syscall'] = {}
 
-    for item in AuditMsgSyscal:
+    for item in AuditMsgSyscall:
         key, value = item.get_entry(msg_parts)
         event_data['syscall'][key] = value
 
@@ -197,7 +212,6 @@ def __parse_syscall(msg_parts: list, event_data: dict) -> None:
 def __parse_raw_msg(msg: str, event_data: dict):
     # We can include inferred items in our entry
     parts = msg.split()
-    key, msgctype
     match get_msg_type(parts):
         case 'PATH':
             return __parse_path(parts, event_data['paths'])
@@ -289,7 +303,7 @@ class AuditdHandler:
         self.audis_reader = None
         self.audis_writer = None
         self.partial_records = defaultdict(AUDITEntry)
-        self.alerts_queue = deque()  # Queue for alerts to send to middlewared process
+        self.alerts_queue = deque()  # Queue for middleware alerts
 
     async def __setup_reader(self) -> None:
         r, w = await asyncio.open_unix_connection(path=self.audis_path)
@@ -312,7 +326,7 @@ class AuditdHandler:
         msgid = get_msg_id(parts)
         msgtype = get_msg_type(parts)
 
-        if not msgtype in MULTIPART_EVENT:
+        if msgtype not in MULTIPART_EVENT:
             # TODO add handling
             return None
 
