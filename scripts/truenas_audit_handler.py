@@ -43,7 +43,6 @@ class TNAuditHandler(logging.handlers.SysLogHandler):
 
     def drain_pending_queue(self):
         while self.pending_queue:
-            print('draining queue')
             record = self.pending_queue.popleft()
             try:
                 super().emit(record)
@@ -59,7 +58,6 @@ class TNAuditHandler(logging.handlers.SysLogHandler):
             # Failed to drain our pending queue so add this record to the
             # ever-growing deque
             self.pending_queue.append(record)
-            print('adding record')
             return
 
         try:
