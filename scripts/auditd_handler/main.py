@@ -39,12 +39,9 @@ class AuditdHandler:
         self.audis_reader = r
         self.audis_writer = w
 
-    async def __send_entry_impl(self, json_data: str) -> None:
-        await self.loop.run_in_executor(None, syslog, json_data)
-
     async def send_completed(self, msgid: str, data: AUDITEntry) -> None:
         json_data = audit_entry_to_json(msgid, data)
-        return await self.__send_entry_impl(json_data)
+        await self.loop.run_in_executor(None, syslog, json_data)
 
     async def parse_audit_line(self, line: bytes):
         # decode and strip off trailing newline character
