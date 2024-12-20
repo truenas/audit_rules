@@ -126,6 +126,12 @@ def get_msg_id(data: list[str]) -> str:
 
 
 class AuditMsgPath(AuditMsgParser):
+    """
+    Parser for path type entry
+
+    Sample entry:
+    "type=PATH msg=audit(1734547436.320:852): item=1 name=\"/usr/local/libexec/disable-rootfs-protection\" inode=46471 dev=00:23 mode=0100755 ouid=0 ogid=0 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0 OUID=\"root\" OGID=\"root\""  # noqa
+    """
     NAME = (3, str)
     INODE = (4, int)
     DEV = (5, str)
@@ -136,6 +142,12 @@ class AuditMsgPath(AuditMsgParser):
 
 
 class AuditMsgProctitle(AuditMsgParser):
+    """
+    Parser for PROCTITLE type messages
+
+    Sample entry:
+    "type=PROCTITLE msg=audit(1734547436.320:852): proctitle=2F7573722F62696E2F707974686F6E33002F7573722F6C6F63616C2F6C6962657865632F64697361626C652D726F6F7466732D70726F74656374696F6E"  # noqa
+    """
     PROCTITLE = (2, str)
 
     def get_entry(self, data: list[str]) -> tuple:
@@ -145,10 +157,22 @@ class AuditMsgProctitle(AuditMsgParser):
 
 
 class AuditMsgCwd(AuditMsgParser):
+    """
+    Parser for CWD type messages
+
+    Sample entry:
+    "type=CWD msg=audit(1734547436.320:852): cwd=\"/root\""
+    """
     CWD = (2, str)
 
 
 class AuditMsgSyscall(AuditMsgParser):
+    """
+    Parser for SYSCALL type messages
+
+    Sample entry:
+    "type=SYSCALL msg=audit(1734547436.320:852): arch=c000003e syscall=59 success=yes exit=0 a0=7fb27f458c70 a1=7fb27f458ce0 a2=56289c566760 a3=8 items=4 ppid=10424 pid=11969 auid=0 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=pts2 ses=12 comm=\"disable-rootfs-\" exe=\"/usr/bin/python3.11\" subj=unconfined key=\"escalation\" ARCH=x86_64 SYSCALL=execve AUID=\"root\" UID=\"root\" GID=\"root\" EUID=\"root\" SUID=\"root\" FSUID=\"root\" EGID=\"root\" SGID=\"root\" FSGID=\"root\"  # noqa
+    """
     SUCCESS = (4, bool)
     EXIT = (5, int)
     PPID = (11, int)
