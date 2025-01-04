@@ -1,0 +1,19 @@
+[Unit]
+Description=TrueNAS Auditd Handler
+DefaultDependencies=no
+
+# Restart this service concurrently with auditd
+PartOf=auditd.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/libexec/truenas_audit_handler.py
+SendSIGKILL=no
+Restart=on-failure
+MemoryDenyWriteExecute=true
+LockPersonality=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+
+[Install]
+WantedBy=multi-user.target
