@@ -215,6 +215,33 @@ class AuditMsgLogin(AuditMsgParser):
     RES = (10, int)
 
 
+class AuditMsgService(AuditMsgParser):
+    """
+    Parser for SERVICE_START and SERVICE_STOP messages
+
+    Sample entry:
+    "type=SERVICE_START msg=audit(1736973663.599:429): pid=1 uid=0 auid=4294967295 ses=4294967295 subj=unconfined msg='unit=smbd comm=\"systemd\" exe=\"/usr/lib/systemd/systemd\" hostname=? addr=? terminal=? res=success' UID=\"root\" AUID=\"unset\""
+    """
+    SUBJ = (6, str)
+    UNIT = (7, str)
+    COMM = (8, str)
+    EXE = (9, str)
+    RES = (13, str)
+
+    def get_entry(self, data: list[str]) -> tuple:
+        key, value = super().get_entry(data)
+        match self:
+            case AuditMsgService.UNIT:
+                value = value.split('=', 1)[1]
+                key = 'unit'
+            case AuditMsgService.RES:
+                value = 'success' in value
+            case _:
+                pass
+
+        return (key, value)
+
+
 class AuditMsgEventType(enum.StrEnum):
     LOGIN = 'LOGIN'
     PROCTITLE = 'PROCTITLE'
@@ -237,6 +264,7 @@ class AuditEvent(enum.StrEnum):
     MODULE = 'module-load'
     GENERIC = 'generic'
     LOGIN = 'login'
+    SERVICE = 'service'
 
 
 def get_audit_event(parts: list[str]) -> AuditEvent | None:
@@ -321,18 +349,32 @@ def __parse_syscall(msg_parts: list, event_data: dict) -> None:
         event_data['syscall'][key] = value
 
 
-def __parse_login(msg_parts: list, event_data: dict) -> None:
+def __parse_login(msg_parts: list, event_data: dict) -> AuditEvent.LOGIN:
     event_data['login'] = {}
 
     for item in AuditMsgLogin:
         key, value = item.get_entry(msg_parts)
         event_data['login'][key] = value
 
+    return AuditEvent.LOGIN
+
+
+def __parse_service(msg_type: str, msg_parts: list, event_data: dict) -> AuditEvent.SERVICE:
+    event_data['service_action'] = msg_type
+
+    for item in AuditMsgService:
+        key, value = item.get_entry(msg_parts)
+        event_data[key] = value
+
+    return AuditEvent.SERVICE
+
 
 def __parse_raw_msg(msg: str, event_data: dict):
     # We can include inferred items in our entry
     parts = msg.split()
-    match get_msg_type(parts):
+    msg_type = get_msg_type(parts)
+
+    match msg_type:
         case 'PATH':
             return __parse_path(parts, event_data['paths'])
         case 'PROCTITLE':
@@ -343,6 +385,8 @@ def __parse_raw_msg(msg: str, event_data: dict):
             return __parse_syscall(parts, event_data)
         case 'LOGIN':
             return __parse_login(parts, event_data)
+        case 'SERVICE_START' | 'SERVICE_STOP':
+            return __parse_service(msg_type, parts, event_data)
         case _:
             pass
 
@@ -364,7 +408,11 @@ def __generate_event_data(
         data_out['event_data']['raw_lines'] = None
 
     for item in raw_lines:
-        __parse_raw_msg(item, data_out['event_data'])
+        if (
+            (found_event_type := __parse_raw_msg(item, data_out['event_data'])) is not None and
+            data_out['event'] == AuditEvent.GENERIC.upper()
+        ):
+            data_out['event'] = found_event_type.upper()
 
 
 def __parse_msgid(msgid: str, entry_data: dict):
