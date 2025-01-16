@@ -31,7 +31,7 @@ DEFAULT_SYSLOG_SOCK = '/var/run/syslog-ng/auditd.sock'
 DEFAULT_RECOVERY_FILE = '/var/run/middleware/.auditd_handler.recovery'
 SYSLOG_IDENT = 'TNAUDIT_SYSTEM: '
 AUDITD_LINE_SEPARATOR = '\x1d'
-AUDITD_NULL_VALUES = frozenset(['(null)', '(none)'])
+AUDITD_NULL_VALUES = frozenset(['(null)', '(none)', '?', 'unset'])
 JSON_NULL = 'null'
 
 # TODO: generate critical middleware alert if our backlog starts to hit
@@ -55,7 +55,7 @@ class AuditMsgParser(enum.Enum):
             if value[0] == '"':
                 value = value[1:]
             if value[-1] == '"':
-                value = value[0:-1]
+                value = value[:-1]
 
             # We may have literal string denoting a NULL value change back to
             # python None type, which will then be encoded as JSON NULL when
@@ -220,7 +220,7 @@ class AuditMsgService(AuditMsgParser):
     Parser for SERVICE_START and SERVICE_STOP messages
 
     Sample entry:
-    "type=SERVICE_START msg=audit(1736973663.599:429): pid=1 uid=0 auid=4294967295 ses=4294967295 subj=unconfined msg='unit=smbd comm=\"systemd\" exe=\"/usr/lib/systemd/systemd\" hostname=? addr=? terminal=? res=success' UID=\"root\" AUID=\"unset\""
+    "type=SERVICE_START msg=audit(1736973663.599:429): pid=1 uid=0 auid=4294967295 ses=4294967295 subj=unconfined msg='unit=smbd comm=\"systemd\" exe=\"/usr/lib/systemd/systemd\" hostname=? addr=? terminal=? res=success' UID=\"root\" AUID=\"unset\""  # noqa
     """
     SUBJ = (6, str)
     UNIT = (7, str)
@@ -238,6 +238,19 @@ class AuditMsgService(AuditMsgParser):
                 value = 'success' in value
             case _:
                 pass
+
+        return (key, value)
+
+
+class AuditMsgPamBase(AuditMsgParser):
+    PID = (2, int)
+    FUNCTION = (7, str)
+
+    def get_entry(self, data: list[str]) -> tuple:
+        key, value = super().get_entry(data)
+        if self is AuditMsgPamBase.FUNCTION:
+            value = value.split('=', 1)[1]
+            key = 'function'
 
         return (key, value)
 
@@ -265,6 +278,7 @@ class AuditEvent(enum.StrEnum):
     GENERIC = 'generic'
     LOGIN = 'login'
     SERVICE = 'service'
+    CREDENTIAL = 'credential'
 
 
 def get_audit_event(parts: list[str]) -> AuditEvent | None:
@@ -331,7 +345,7 @@ def __parse_proctitle(msg_parts: list, event_data: dict) -> None:
 
 
 def __parse_syscall(msg_parts: list, event_data: dict) -> None:
-    if event_data['syscall'] is not None:
+    if event_data.get('syscall') is not None:
         return
 
     event_data['syscall'] = {}
@@ -349,24 +363,61 @@ def __parse_syscall(msg_parts: list, event_data: dict) -> None:
         event_data['syscall'][key] = value
 
 
-def __parse_login(msg_parts: list, event_data: dict) -> AuditEvent.LOGIN:
-    event_data['login'] = {}
+def __parse_login(msg_parts: list) -> dict:
+    event_data = {'event_type': AuditEvent.LOGIN.upper()}
 
     for item in AuditMsgLogin:
         key, value = item.get_entry(msg_parts)
-        event_data['login'][key] = value
+        event_data[key] = value
 
-    return AuditEvent.LOGIN
+    return event_data
 
 
-def __parse_service(msg_type: str, msg_parts: list, event_data: dict) -> AuditEvent.SERVICE:
-    event_data['service_action'] = msg_type
+def __parse_service(msg_type: str, msg_parts: list) -> dict:
+    event_data = {'event_type': AuditEvent.SERVICE.upper(), 'service_action': msg_type}
 
     for item in AuditMsgService:
         key, value = item.get_entry(msg_parts)
         event_data[key] = value
 
-    return AuditEvent.SERVICE
+    return event_data
+
+
+def __parse_pam(msg_type: str, msg_parts: list) -> dict:
+    event_data = {'event_type': AuditEvent.CREDENTIAL.upper(), 'auth_action': msg_type}
+
+    for item in AuditMsgPamBase:
+        key, value = item.get_entry(msg_parts)
+        event_data[key] = value
+
+    # Everything after pam function is variable
+    for item in msg_parts[AuditMsgPamBase.FUNCTION.idx + 1:]:
+        key, value = item.split('=', 1)
+
+        if value[0] == '"':
+            value = value[1:]
+        if value[-1] == '"':
+            value = value[:-1]
+
+        if value.isdigit():
+            value = int(value)
+        elif value in AUDITD_NULL_VALUES:
+            value = None
+
+        match key:
+            case 'res':
+                value = value.startswith('success')
+            case 'AUID':
+                key = 'username'
+            case 'UID' | 'ID':
+                # We're only concerned about logging the audit uid
+                continue
+            case _:
+                pass
+
+        event_data[key] = value
+
+    return event_data
 
 
 def __parse_raw_msg(msg: str, event_data: dict):
@@ -383,10 +434,16 @@ def __parse_raw_msg(msg: str, event_data: dict):
             return __parse_cwd(parts, event_data)
         case 'SYSCALL':
             return __parse_syscall(parts, event_data)
+        # Below this point are single-part events that return customized
+        # Event data
         case 'LOGIN':
-            return __parse_login(parts, event_data)
+            return __parse_login(parts)
         case 'SERVICE_START' | 'SERVICE_STOP':
-            return __parse_service(msg_type, parts, event_data)
+            return __parse_service(msg_type, parts)
+        case 'USER_START' | 'USER_END' | 'USER_ACCT' | 'USER_AUTH' | 'USER_LOGIN' | 'USER_ERR':
+            return __parse_pam(msg_type, parts)
+        case 'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP':
+            return __parse_pam(msg_type, parts)
         case _:
             pass
 
@@ -408,11 +465,29 @@ def __generate_event_data(
         data_out['event_data']['raw_lines'] = None
 
     for item in raw_lines:
-        if (
-            (found_event_type := __parse_raw_msg(item, data_out['event_data'])) is not None and
-            data_out['event'] == AuditEvent.GENERIC.upper()
-        ):
-            data_out['event'] = found_event_type.upper()
+        if (new_event_data := __parse_raw_msg(item, data_out['event_data'])) is not None:
+            # If event is GENERIC then the entry is defaulted and we can
+            # overwrite safely without losing info
+            if data_out['event'] == AuditEvent.GENERIC.upper():
+                data_out['event_data'] = new_event_data
+                data_out['event'] = data_out['event_data'].pop('event_type')
+
+            # This in principle shouldn't happen but to be on safe side we merge
+            # event data
+            else:
+                new_event_data.pop('event_type')
+                data_out['event_data'] | new_event_data
+
+            if (username := new_event_data.get('username') or new_event_data.get('acct')) is not None:
+                if not data_out['user']:
+                    data_out['user'] = username
+
+            if (addr := new_event_data.get('addr')) and data_out['addr'] == '127.0.0.1':
+                data_out['addr'] = addr
+
+            if (res := new_event_data.get('res')) is not None:
+                if isinstance(res, bool):
+                    data_out['success'] = res
 
 
 def __parse_msgid(msgid: str, entry_data: dict):
@@ -455,7 +530,6 @@ def audit_entry_to_json(msgid: str, entry: AUDITEntry) -> str:
             'audit_msg_id_str': msgid,
             'proctitle': None,
             'syscall': None,
-            'login': None,
             'cwd': None,
             'paths': [],
             'raw_lines': entry.raw_lines
@@ -465,12 +539,6 @@ def audit_entry_to_json(msgid: str, entry: AUDITEntry) -> str:
 
     __parse_msgid(msgid, to_write['TNAUDIT'])
     __generate_event_data(entry, to_write['TNAUDIT'])
-
-    # Message may contain login operation. In this case flag as a login
-    # event if it is currently identified as a GENERIC event
-    if to_write['TNAUDIT']['event_data']['login']:
-        if to_write['TNAUDIT']['event'] == AuditEvent.GENERIC:
-            to_write['TNAUDIT']['event'] = AuditEvent.LOGIN
 
     to_write['TNAUDIT']['event_data'] = dumps(to_write['TNAUDIT']['event_data'])
 
