@@ -55,7 +55,7 @@ class AuditMsgParser(enum.Enum):
             if value[0] == '"':
                 value = value[1:]
             if value[-1] == '"':
-                value = value[0:-1]
+                value = value[:-1]
 
             # We may have literal string denoting a NULL value change back to
             # python None type, which will then be encoded as JSON NULL when
@@ -397,7 +397,7 @@ def __parse_pam(msg_type: str, msg_parts: list) -> dict:
         if value[0] == '"':
             value = value[1:]
         if value[-1] == '"':
-            value = value[0:-1]
+            value = value[:-1]
 
         if value.isdigit():
             value = int(value)
