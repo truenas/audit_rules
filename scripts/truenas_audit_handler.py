@@ -255,6 +255,33 @@ class AuditMsgPamBase(AuditMsgParser):
         return (key, value)
 
 
+class AuditMsgTty(AuditMsgParser):
+    """
+    pam_tty_audit generates unique multi-part messages.
+
+    Sample entry:
+    type=TTY msg=audit(1737410962.644:698): tty pid=28250 uid=0 auid=0 ses=16 major=136 minor=1 comm="zsh" data=6666667F7F7F7F657869740AUID="root" AUID="root"  # noqa
+    """
+    PID = (3, int)
+    UID = (4, int)
+    SES = (6, int)
+    MAJOR = (7, int)
+    MINOR = (8, int)
+    COMM = (9, str)
+    DATA = (10, str)
+    AUID_STR = (11, str)
+
+    def get_entry(self, data: list[str]) -> tuple:
+        key, value = super().get_entry(data)
+        match self:
+            case AuditMsgTty.DATA:
+                value = value.split('AUID')[0]
+            case AuditMsgTty.AUID_STR:
+                key = 'username'
+
+        return (key, value)
+
+
 class AuditMsgEventType(enum.StrEnum):
     LOGIN = 'LOGIN'
     PROCTITLE = 'PROCTITLE'
@@ -275,10 +302,12 @@ class AuditEvent(enum.StrEnum):
     IDENTITY = 'identity'
     TIMECHANGE = 'time-change'
     MODULE = 'module-load'
+    # Items below are not set as keys
     GENERIC = 'generic'
     LOGIN = 'login'
     SERVICE = 'service'
     CREDENTIAL = 'credential'
+    TTY_RECORD = 'tty_record'
 
 
 def get_audit_event(parts: list[str]) -> AuditEvent | None:
@@ -383,6 +412,17 @@ def __parse_service(msg_type: str, msg_parts: list) -> dict:
     return event_data
 
 
+def __parse_tty(msg_parts: list, event_data: dict) -> dict:
+    event_data['event_type'] = AuditEvent.TTY_RECORD.upper()
+    event_data['tty_record'] = {}
+
+    for item in AuditMsgTty:
+        key, value = item.get_entry(msg_parts)
+        event_data['tty_record'][key] = value
+
+    return event_data
+
+
 def __parse_pam(msg_type: str, msg_parts: list) -> dict:
     event_data = {'event_type': AuditEvent.CREDENTIAL.upper(), 'auth_action': msg_type}
 
@@ -444,6 +484,8 @@ def __parse_raw_msg(msg: str, event_data: dict):
             return __parse_pam(msg_type, parts)
         case 'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP':
             return __parse_pam(msg_type, parts)
+        case 'TTY':
+            return __parse_tty(parts, event_data)
         case _:
             pass
 
