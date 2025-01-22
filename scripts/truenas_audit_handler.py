@@ -716,6 +716,11 @@ class AuditdHandler:
         while not self.audis_reader.at_eof():
             await self.handle_auditd_msg()
 
+        # It's possible that auditd has stopped and syslog-ng isn't in
+        # a good state. Write out the recovery file and hope for happier
+        # times after a service restart.
+        await self.loop.run_in_executor(None, self.__write_recovery_file)
+
 
 def __process_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=DESCRIPTION)
