@@ -243,6 +243,12 @@ class AuditMsgService(AuditMsgParser):
 
 
 class AuditMsgPamBase(AuditMsgParser):
+    """
+    Parser for messsages associated with PAM
+
+    Sample entry:
+    type=CRED_DISP msg=audit(1738184696.902:276470): pid=1389074 uid=0 auid=4294967295 ses=4294967295 subj=unconfined msg='op=PAM:setcred grantors=pam_rootok acct="truenas_admin" exe="/usr/bin/su" hostname=? addr=? terminal=/dev/pts/0 res=success'
+    """
     PID = (2, int)
     FUNCTION = (7, str)
 
