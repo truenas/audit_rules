@@ -11,3 +11,6 @@
 
 ## TrueNAS configuration
 -a always,exit -F arch=b64 -F dir=/data/ -F perm=r -F auid!=unset -F key=escalation
+
+## TrueNAS management
+-a always,exit -F arch=b64 -F path=/usr/bin/incus -F perm=x -F auid!=unset -F key=escalation
