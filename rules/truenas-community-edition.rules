@@ -1,6 +1,6 @@
-## These rules are to be applied to TrueNAS Community Edition
+## These rules are to be applied to TrueNAS Non-STIG
 ##
-## These rules quiet the PAM logging
+## Quiet PAM logging
 -A exclude,always -F msgtype=USER_AUTH
 -A exclude,always -F msgtype=USER_START
 -A exclude,always -F msgtype=USER_END
@@ -8,3 +8,6 @@
 -A exclude,always -F msgtype=CRED_REFR
 -A exclude,always -F msgtype=CRED_DISP
 -A exclude,always -F msgtype=CRED_ACQ
+
+## TrueNAS configuration
+-a always,exit -F arch=b64 -F dir=/data/ -F perm=r -F auid!=unset -F key=escalation
