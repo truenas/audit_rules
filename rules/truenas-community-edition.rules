@@ -1,0 +1,16 @@
+## These rules are to be applied to TrueNAS Non-STIG
+##
+## Quiet PAM logging
+-A exclude,always -F msgtype=USER_AUTH
+-A exclude,always -F msgtype=USER_START
+-A exclude,always -F msgtype=USER_END
+-A exclude,always -F msgtype=USER_ACCT
+-A exclude,always -F msgtype=CRED_REFR
+-A exclude,always -F msgtype=CRED_DISP
+-A exclude,always -F msgtype=CRED_ACQ
+
+## TrueNAS configuration
+-a always,exit -F arch=b64 -F dir=/data/ -F perm=r -F auid!=unset -F key=escalation
+
+## TrueNAS management
+-a always,exit -F arch=b64 -F path=/usr/bin/incus -F perm=x -F auid!=unset -F key=escalation
