@@ -1,0 +1,6 @@
+## These rules are to be applied to all TrueNAS
+## 
+-a exit,always -F arch=b64 -S execve -F path=/sbin/reboot -k escalation
+-a exit,always -F arch=b64 -S execve -F path=/sbin/init -k escalation
+-a exit,always -F arch=b64 -S execve -F path=/sbin/poweroff -k escalation
+-a exit,always -F arch=b64 -S execve -F path=/sbin/shutdown -k escalation
