@@ -4,3 +4,4 @@
 -a exit,always -F arch=b64 -S execve -F path=/usr/sbin/init -k escalation
 -a exit,always -F arch=b64 -S execve -F path=/usr/sbin/poweroff -k escalation
 -a exit,always -F arch=b64 -S execve -F path=/usr/sbin/shutdown -k escalation
+-a exit,always -F arch=b64 -S execve -F path=/usr/sbin/halt -k escalation
