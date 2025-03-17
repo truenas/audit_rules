@@ -8,6 +8,9 @@
 -A exclude,always -F msgtype=CRED_REFR
 -A exclude,always -F msgtype=CRED_DISP
 -A exclude,always -F msgtype=CRED_ACQ
+## Quiet SERVICE_START and SERVICE_STOP
+-A exclude,always -F msgtype=SERVICE_START
+-A exclude,always -F msgtype=SERVICE_STOP
 
 ## TrueNAS configuration
 -a always,exit -F arch=b64 -F dir=/data/ -F perm=r -F auid!=unset -F key=escalation
