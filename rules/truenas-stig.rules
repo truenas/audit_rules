@@ -4,5 +4,5 @@
 ## configuration and control
 -a exit,always -F arch=b64 -S all -F dir=/etc/nginx -F auid!=unset -k escalation
 ## logs
--a exit,always -F arch=b64 -F path=/var/log/nginx/access.log -F perm=wa -F euid!=33 -k escalation
--a exit,always -F arch=b64 -F path=/var/log/nginx/error.log -F perm=wa -F euid!=33 -k escalation
+-a exit,always -F arch=b64 -F path=/var/log/nginx/access.log -F perm=wa -F auid!=unset -F euid!=33 -k escalation
+-a exit,always -F arch=b64 -F path=/var/log/nginx/error.log -F perm=wa -F auid!=unset -F euid!=33 -k escalation
