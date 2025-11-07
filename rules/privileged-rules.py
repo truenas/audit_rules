@@ -54,8 +54,8 @@ def generate_audit_privilege(target_dir: str, privilege_file: str, prefix: str) 
                         write_audit_entry(target, f, prefix)
                 except FileNotFoundError:
                     pass  # possibly broken symlink
-                except OSError as os_e:
-                    if os_e.errno == 40:
+                except OSError as e:
+                    if e.errno == 40:
                         pass  # avoid circular link
 
         f.flush()
