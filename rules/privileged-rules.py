@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import argparse
+import errno
 
 from io import TextIOWrapper
 from os import listxattr, path, stat, walk
@@ -54,9 +55,14 @@ def generate_audit_privilege(target_dir: str, privilege_file: str, prefix: str) 
                         write_audit_entry(target, f, prefix)
                 except FileNotFoundError:
                     pass  # possibly broken symlink
-                except OSError as e:
-                    if e.errno == 40:
+                except OSError as os_e:
+                    if os_e.errno == errno.ELOOP:
                         pass  # avoid circular link
+                    else:
+                        print(f"Detected unhandled OSError in auditd privileged rule file generation: {os_e}")
+                except Exception as e:
+                    # Unexpected error.  Skip this file, but record the event.
+                    print(f"Detected error in auditd privileged rule file generation: {e}")
 
         f.flush()
 
