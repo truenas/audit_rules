@@ -2,6 +2,7 @@
 
 import argparse
 import errno
+import sys
 
 from io import TextIOWrapper
 from os import listxattr, path, stat, walk
@@ -59,10 +60,10 @@ def generate_audit_privilege(target_dir: str, privilege_file: str, prefix: str) 
                     if os_e.errno == errno.ELOOP:
                         pass  # avoid circular link
                     else:
-                        print(f"Detected unhandled OSError in auditd privileged rule file generation: {os_e}")
+                        print(f"Detected unhandled OSError in auditd privileged rule file generation: {os_e}", file=sys.stderr)
                 except Exception as e:
                     # Unexpected error.  Skip this file, but record the event.
-                    print(f"Detected error in auditd privileged rule file generation: {e}")
+                    print(f"Detected error in auditd privileged rule file generation: {e}", file=sys.stderr)
 
         f.flush()
 
