@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 
 import argparse
+import errno
+import sys
 
 from io import TextIOWrapper
 from os import listxattr, path, stat, walk
@@ -53,8 +55,15 @@ def generate_audit_privilege(target_dir: str, privilege_file: str, prefix: str) 
                     if file_has_setuid_bit(target) or file_has_capability(target):
                         write_audit_entry(target, f, prefix)
                 except FileNotFoundError:
-                    # possibly broken symlink
-                    pass
+                    pass  # possibly broken symlink
+                except OSError as os_e:
+                    if os_e.errno == errno.ELOOP:
+                        pass  # avoid circular link
+                    else:
+                        print(f"Detected unhandled OSError in auditd privileged rule file generation: {os_e}", file=sys.stderr)
+                except Exception as e:
+                    # Unexpected error.  Skip this file, but record the event.
+                    print(f"Detected error in auditd privileged rule file generation: {e}", file=sys.stderr)
 
         f.flush()
 
@@ -66,13 +75,13 @@ def main():
         help='Target directory in which to find privileged files.'
     )
     parser.add_argument(
-       '-p', '--privilege_file',
-       help='File in which to write privilege rules.'
+        '-p', '--privilege_file',
+        help='File in which to write privilege rules.'
     )
     parser.add_argument(
-       '-x', '--prefix',
-       help='File in which to write privilege rules.',
-       default=''
+        '-x', '--prefix',
+        help='File in which to write privilege rules.',
+        default=''
     )
 
     args = parser.parse_args()
