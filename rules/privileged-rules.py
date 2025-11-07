@@ -53,8 +53,10 @@ def generate_audit_privilege(target_dir: str, privilege_file: str, prefix: str) 
                     if file_has_setuid_bit(target) or file_has_capability(target):
                         write_audit_entry(target, f, prefix)
                 except FileNotFoundError:
-                    # possibly broken symlink
-                    pass
+                    pass  # possibly broken symlink
+                except OSError as OSe:
+                    if OSe.errno == 40:
+                        pass  # avoid circular link
 
         f.flush()
 
@@ -66,13 +68,13 @@ def main():
         help='Target directory in which to find privileged files.'
     )
     parser.add_argument(
-       '-p', '--privilege_file',
-       help='File in which to write privilege rules.'
+        '-p', '--privilege_file',
+        help='File in which to write privilege rules.'
     )
     parser.add_argument(
-       '-x', '--prefix',
-       help='File in which to write privilege rules.',
-       default=''
+        '-x', '--prefix',
+        help='File in which to write privilege rules.',
+        default=''
     )
 
     args = parser.parse_args()
