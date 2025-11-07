@@ -148,7 +148,6 @@
 
 ## Server configuration
 -a always,exit -F arch=b64 -F path=/etc/exports -F perm=wa -F auid!=unset -F key=export
--a always,exit -F arch=b64 -F dir=/etc/exports.d -F perm=wa -F auid!=unset -F key=export
 -a always,exit -F arch=b64 -F path=/etc/smb4.conf -F perm=wa -F auid!=unset -F key=export
 -a always,exit -F arch=b64 -F path=/etc/proftpd/proftpd.conf -F perm=wa -F auid!=unset -F key=export
 -a always,exit -F arch=b64 -F dir=/etc/proftpd/conf.d -F perm=wa -F auid!=unset -F key=export
