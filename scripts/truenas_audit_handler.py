@@ -719,7 +719,7 @@ class AuditdHandler:
         # The auditd systemd unit upholds this script and
         # so exit run loop if we get EOF. When auditd comes
         # back it will start this script back up.
-        while not self.audis_reader.at_eof():
+        while self.audis_reader is not None and not self.audis_reader.at_eof():
             await self.handle_auditd_msg()
 
         # It's possible that auditd has stopped and syslog-ng isn't in
