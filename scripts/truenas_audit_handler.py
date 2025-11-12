@@ -758,7 +758,6 @@ def __validate_args(args: argparse.Namespace):
 
 
 def main():
-    # loop = asyncio.get_event_loop()
     args = __process_args()
     __validate_args(args)
 
