@@ -524,7 +524,7 @@ def __generate_event_data(
             # event data
             else:
                 new_event_data.pop('event_type')
-                data_out['event_data'] | new_event_data
+                data_out['event_data'] |= new_event_data
 
             if (username := new_event_data.get('username') or new_event_data.get('acct')) is not None:
                 if not data_out['user']:
@@ -758,16 +758,21 @@ def __validate_args(args: argparse.Namespace):
 
 
 def main():
-    loop = asyncio.get_event_loop()
     args = __process_args()
     __validate_args(args)
+
+    loop = asyncio.new_event_loop()
     handler = AuditdHandler(
         args.audit_socket,
         args.syslog_socket,
         args.recovery_file,
         loop
     )
-    loop.run_until_complete(handler.run())
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(handler.run())
+    finally:
+        loop.close()
 
 
 if __name__ == '__main__':
