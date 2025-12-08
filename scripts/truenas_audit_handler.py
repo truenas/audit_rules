@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from collections import defaultdict, deque
 from json import dumps
-from middlewared.logger import TNSyslogHandler
+from middlewared.logger import (
+    TNSyslogHandler,
+    TRUENAS_AUDIT_HANDLER_LOGFILE,
+    DEFAULT_LOGFORMAT
+)
 from queue import Queue
 from random import getrandbits
 from uuid import UUID
@@ -37,6 +41,29 @@ JSON_NULL = 'null'
 # TODO: generate critical middleware alert if our backlog starts to hit
 # critical levels
 ALERT_QUEUE_DEPTH = 1024
+
+
+def setup_ah_logger():
+    logger = logging.getLogger('truenas_audit_handler')
+    logger.setLevel(logging.DEBUG)
+
+    log_dir = os.path.dirname(TRUENAS_AUDIT_HANDLER_LOGFILE)
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+
+    handler = logging.FileHandler(TRUENAS_AUDIT_HANDLER_LOGFILE, mode='a')
+    handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(DEFAULT_LOGFORMAT)
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+
+    return logger
+
+
+# For logging messages about the handler
+ahlogger = setup_ah_logger()
 
 
 class AuditMsgParser(enum.Enum):
@@ -357,6 +384,11 @@ MULTIPART_EVENT = frozenset([
 ])
 
 
+def report_unhandled_msg(ve: ValueError, msg_parts: list):
+    ahlogger.error(f"tnaudit ValueError: {ve}")
+    ahlogger.error(f"Unhandled auditd message: {msg_parts}")
+
+
 def __parse_cwd(msg_parts: list, event_data: dict) -> None:
     key, cwd = AuditMsgCwd.CWD.get_entry(msg_parts)
     event_data['cwd'] = cwd
@@ -368,7 +400,12 @@ def __parse_path(msg_parts: list, paths: list) -> None:
     # deliberately leave off the item number from the line since it
     # can be inferred from array index.
     for item in AuditMsgPath:
-        key, value = item.get_entry(msg_parts)
+        try:
+            key, value = item.get_entry(msg_parts)
+        except ValueError as ve:
+            report_unhandled_msg(ve, msg_parts)
+            # ahlogger.error(f"tnaudit ValueError: {ve}")
+            # ahlogger.error(f"Unhandled auditd message: {msg_parts}")
         path_entry[key] = value
 
     paths.append(path_entry)
@@ -394,16 +431,22 @@ def __parse_syscall(msg_parts: list, event_data: dict) -> None:
         msg_obj = AuditMsgSyscall
 
     for item in msg_obj:
-        key, value = item.get_entry(msg_parts)
-        event_data['syscall'][key] = value
+        try:
+            key, value = item.get_entry(msg_parts)
+            event_data['syscall'][key] = value
+        except ValueError as ve:
+            report_unhandled_msg(ve, msg_parts)
 
 
 def __parse_login(msg_parts: list) -> dict:
     event_data = {'event_type': AuditEvent.LOGIN.upper()}
 
     for item in AuditMsgLogin:
-        key, value = item.get_entry(msg_parts)
-        event_data[key] = value
+        try:
+            key, value = item.get_entry(msg_parts)
+            event_data[key] = value
+        except ValueError as ve:
+            report_unhandled_msg(ve, msg_parts)
 
     return event_data
 
@@ -412,8 +455,11 @@ def __parse_service(msg_type: str, msg_parts: list) -> dict:
     event_data = {'event_type': AuditEvent.SERVICE.upper(), 'service_action': msg_type}
 
     for item in AuditMsgService:
-        key, value = item.get_entry(msg_parts)
-        event_data[key] = value
+        try:
+            key, value = item.get_entry(msg_parts)
+            event_data[key] = value
+        except ValueError as ve:
+            report_unhandled_msg(ve, msg_parts)
 
     return event_data
 
@@ -423,8 +469,11 @@ def __parse_tty(msg_parts: list, event_data: dict) -> dict:
     event_data['tty_record'] = {}
 
     for item in AuditMsgTty:
-        key, value = item.get_entry(msg_parts)
-        event_data['tty_record'][key] = value
+        try:
+            key, value = item.get_entry(msg_parts)
+            event_data['tty_record'][key] = value
+        except ValueError as ve:
+            report_unhandled_msg(ve, msg_parts)
 
     return event_data
 
@@ -438,30 +487,33 @@ def __parse_pam(msg_type: str, msg_parts: list) -> dict:
 
     # Everything after pam function is variable
     for item in msg_parts[AuditMsgPamBase.FUNCTION.idx + 1:]:
-        key, value = item.split('=', 1)
+        try:
+            key, value = item.split('=', 1)
 
-        if value[0] == '"':
-            value = value[1:]
-        if value[-1] == '"':
-            value = value[:-1]
+            if value[0] == '"':
+                value = value[1:]
+            if value[-1] == '"':
+                value = value[:-1]
 
-        if value.isdigit():
-            value = int(value)
-        elif value in AUDITD_NULL_VALUES:
-            value = None
+            if value.isdigit():
+                value = int(value)
+            elif value in AUDITD_NULL_VALUES:
+                value = None
 
-        match key:
-            case 'res':
-                value = value.startswith('success')
-            case 'AUID':
-                key = 'username'
-            case 'UID' | 'ID':
-                # We're only concerned about logging the audit uid
-                continue
-            case _:
-                pass
+            match key:
+                case 'res':
+                    value = value.startswith('success')
+                case 'AUID':
+                    key = 'username'
+                case 'UID' | 'ID':
+                    # We're only concerned about logging the audit uid
+                    continue
+                case _:
+                    pass
 
-        event_data[key] = value
+            event_data[key] = value
+        except ValueError as ve:
+            report_unhandled_msg(ve, msg_parts)
 
     return event_data
 
@@ -690,10 +742,14 @@ class AuditdHandler:
         entry = self.partial_records[msgid]
         entry.raw_lines.append(decoded)
 
-        # prioritize line with the identifier key
-        if (audit_event := get_audit_event(parts)) is not None:
-            entry.event_type = audit_event
-            entry.key_event = parts
+        try:
+            # prioritize line with the identifier key
+            if (audit_event := get_audit_event(parts)) is not None:
+                entry.event_type = audit_event
+                entry.key_event = parts
+        except Exception as e:
+            ahlogger.error(f"audit message exception: {e}")
+            ahlogger.error(f"Unhandled audit message: {decoded}")
 
         if msgtype != AuditMsgEventType.EOE:
             # Incomplete message. We store in `partial_records` dictionary
