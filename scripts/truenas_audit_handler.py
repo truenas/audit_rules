@@ -16,7 +16,8 @@ from collections import defaultdict, deque
 from json import dumps
 from middlewared.logger import (
     TNSyslogHandler,
-    TRUENAS_AUDIT_HANDLER_LOGFILE,
+    AUDIT_HANDLER_ERROR_SOCKET,
+    AUDIT_HANDLER_ERROR_IDENT,
     DEFAULT_LOGFORMAT
 )
 from queue import Queue
@@ -44,26 +45,45 @@ ALERT_QUEUE_DEPTH = 1024
 
 
 def setup_ah_logger():
+    """
+    Set up non-blocking logger for audit handler errors/exceptions.
+
+    Uses QueueHandler + QueueListener pattern to avoid blocking the main
+    event loop. Logs are sent to syslog via a dedicated socket with a
+    pending queue to handle temporary syslog unavailability.
+
+    Returns:
+        tuple: (logger, queue_listener) - The logger instance and its queue listener
+               The queue listener must be stopped during shutdown.
+    """
+    # Use QueueHandler to avoid blocking IO in asyncio main loop
+    log_queue = Queue()
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+    queue_handler.setLevel(logging.DEBUG)
+
+    # Create TNSyslogHandler with dedicated socket and pending queue
+    # pending_queue stores failed messages until syslog connection is restored
+    error_handler = TNSyslogHandler(
+        address=AUDIT_HANDLER_ERROR_SOCKET,
+        pending_queue=deque(maxlen=512)
+    )
+    error_handler.setLevel(logging.DEBUG)
+    error_handler.ident = AUDIT_HANDLER_ERROR_IDENT
+    error_handler.setFormatter(logging.Formatter(DEFAULT_LOGFORMAT))
+
+    # QueueListener runs in separate thread to handle log emission
+    queue_listener = logging.handlers.QueueListener(log_queue, error_handler)
+    queue_listener.start()
+
     logger = logging.getLogger('truenas_audit_handler')
     logger.setLevel(logging.DEBUG)
+    logger.addHandler(queue_handler)
 
-    log_dir = os.path.dirname(TRUENAS_AUDIT_HANDLER_LOGFILE)
-    if log_dir and not os.path.exists(log_dir):
-        os.makedirs(log_dir, exist_ok=True)
-
-    handler = logging.FileHandler(TRUENAS_AUDIT_HANDLER_LOGFILE, mode='a')
-    handler.setLevel(logging.DEBUG)
-
-    formatter = logging.Formatter(DEFAULT_LOGFORMAT)
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-
-    return logger
+    return logger, queue_listener
 
 
 # For logging messages about the handler
-ahlogger = setup_ah_logger()
+ahlogger, ah_queue_listener = setup_ah_logger()
 
 
 class AuditMsgParser(enum.Enum):
@@ -404,8 +424,6 @@ def __parse_path(msg_parts: list, paths: list) -> None:
             key, value = item.get_entry(msg_parts)
         except ValueError as ve:
             report_unhandled_msg(ve, msg_parts)
-            # ahlogger.error(f"tnaudit ValueError: {ve}")
-            # ahlogger.error(f"Unhandled auditd message: {msg_parts}")
         path_entry[key] = value
 
     paths.append(path_entry)
@@ -707,6 +725,12 @@ class AuditdHandler:
         os.unlink(self.recovery_file)
 
     def terminate(self):
+        # Stop the global error handler queue listener
+        global ah_queue_listener
+        if ah_queue_listener:
+            ah_queue_listener.stop()
+            ah_queue_listener = None
+
         # By this point our logger has shut down, but we may have a queue.
         self.__write_recovery_file()
 
