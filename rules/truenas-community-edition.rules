@@ -1,7 +1,6 @@
 ## These rules are to be applied to TrueNAS Non-STIG
 ##
 ## Quiet PAM logging
--A exclude,always -F msgtype=USER_AUTH
 -A exclude,always -F msgtype=USER_START
 -A exclude,always -F msgtype=USER_END
 -A exclude,always -F msgtype=USER_ACCT
