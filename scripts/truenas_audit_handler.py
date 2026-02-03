@@ -6,6 +6,7 @@ import enum
 import logging
 import logging.handlers
 import os
+import re
 import signal
 import stat
 
@@ -429,49 +430,48 @@ def __parse_tty(msg_parts: list, event_data: dict) -> dict:
     return event_data
 
 
-def __parse_pam(msg_type: str, msg_parts: list) -> dict:
+def __parse_pam(msg_type: str, raw_msg: str, msg_parts: list) -> dict:
     event_data = {'event_type': AuditEvent.CREDENTIAL.upper(), 'auth_action': msg_type}
 
     for item in AuditMsgPamBase:
         key, value = item.get_entry(msg_parts)
         event_data[key] = value
 
-    # Everything after pam function is variable
-    # Values may contain spaces, so we need to look ahead when parsing
-    variable_parts = msg_parts[AuditMsgPamBase.FUNCTION.idx + 1:]
+    # Extract op_msg from raw string - everything after the function field
+    function_part = msg_parts[AuditMsgPamBase.FUNCTION.idx]
+    function_idx = raw_msg.find(function_part)
 
-    i = 0
-    while i < len(variable_parts):
-        item = variable_parts[i]
+    if function_idx == -1:
+        return event_data
 
-        # Check if this item contains '=' separator
+    # Extract variable section from raw message
+    op_msg_start = function_idx + len(function_part)
+    op_msg = raw_msg[op_msg_start:].strip()
+
+    # Use regex to split on known field names - preserves spaces within values
+    # Include UID, AUID, ID, GID to capture fields after the closing quote
+    pattern = r'(?=\b(?:grantors|acct|exe|hostname|addr|terminal|res|UID|AUID|ID|GID)=)'
+    variable_parts = re.split(pattern, op_msg)
+
+    # Clean up: remove empty strings and strip whitespace
+    variable_parts = [part.strip() for part in variable_parts if part.strip()]
+
+    # Process each key=value pair
+    for item in variable_parts:
         if '=' not in item:
-            i += 1
             continue
 
-        # Split into key and value
+        # Split on first '=' only
         key, value = item.split('=', 1)
 
-        # Look ahead to find where this value ends
-        j = i + 1
-        if key == 'hostname':
-            # Special case: hostname can contain spaces and '=' chars, ends at 'addr='
-            while j < len(variable_parts) and not variable_parts[j].startswith('addr='):
-                j += 1
-        else:
-            # Other fields: collect items without '=' as continuation of value
-            while j < len(variable_parts) and '=' not in variable_parts[j]:
-                j += 1
-
-        # Use slicing and join for efficient string concatenation
-        if j > i + 1:
-            value = ' '.join([value] + variable_parts[i+1:j])
-
-        # Strip quotes if present
+        # Strip quotes if present (both double quotes and single quotes)
         if value:
             if value[0] == '"':
                 value = value[1:]
             if value[-1] == '"':
+                value = value[:-1]
+            # Strip trailing single quote from closing msg quote (e.g., "success'" -> "success")
+            if value[-1] == "'":
                 value = value[:-1]
 
         # Convert to appropriate type
@@ -488,15 +488,11 @@ def __parse_pam(msg_type: str, msg_parts: list) -> dict:
                 key = 'username'
             case 'UID' | 'ID':
                 # We're only concerned about logging the audit uid
-                i = j
                 continue
             case _:
                 pass
 
         event_data[key] = value
-
-        # Move to next key=value pair
-        i = j
 
     return event_data
 
@@ -522,9 +518,9 @@ def __parse_raw_msg(msg: str, event_data: dict):
         case 'SERVICE_START' | 'SERVICE_STOP':
             return __parse_service(msg_type, parts)
         case 'USER_START' | 'USER_END' | 'USER_ACCT' | 'USER_AUTH' | 'USER_LOGIN' | 'USER_ERR':
-            return __parse_pam(msg_type, parts)
+            return __parse_pam(msg_type, msg, parts)
         case 'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP':
-            return __parse_pam(msg_type, parts)
+            return __parse_pam(msg_type, msg, parts)
         case 'TTY':
             return __parse_tty(parts, event_data)
         case _:
