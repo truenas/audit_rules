@@ -468,10 +468,11 @@ def __parse_pam(msg_type: str, msg_parts: list) -> dict:
             value = ' '.join([value] + variable_parts[i+1:j])
 
         # Strip quotes if present
-        if value and value[0] == '"':
-            value = value[1:]
-        if value and value[-1] == '"':
-            value = value[:-1]
+        if value:
+            if value[0] == '"':
+                value = value[1:]
+            if value[-1] == '"':
+                value = value[:-1]
 
         # Convert to appropriate type
         if value.isdigit():
