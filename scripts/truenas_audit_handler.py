@@ -437,19 +437,49 @@ def __parse_pam(msg_type: str, msg_parts: list) -> dict:
         event_data[key] = value
 
     # Everything after pam function is variable
-    for item in msg_parts[AuditMsgPamBase.FUNCTION.idx + 1:]:
+    # Values may contain spaces, so we need to look ahead when parsing
+    variable_parts = msg_parts[AuditMsgPamBase.FUNCTION.idx + 1:]
+
+    i = 0
+    while i < len(variable_parts):
+        item = variable_parts[i]
+
+        # Check if this item contains '=' separator
+        if '=' not in item:
+            i += 1
+            continue
+
+        # Split into key and value
         key, value = item.split('=', 1)
 
-        if value[0] == '"':
+        # Look ahead to find where this value ends
+        j = i + 1
+        if key == 'hostname':
+            # Special case: hostname can contain spaces and '=' chars, ends at 'addr='
+            while j < len(variable_parts) and not variable_parts[j].startswith('addr='):
+                j += 1
+        else:
+            # Other fields: collect items without '=' as continuation of value
+            while j < len(variable_parts) and '=' not in variable_parts[j]:
+                j += 1
+
+        # Use slicing and join for efficient string concatenation
+        if j > i + 1:
+            value = ' '.join([value] + variable_parts[i+1:j])
+
+        # Strip quotes if present
+        if value and value[0] == '"':
             value = value[1:]
-        if value[-1] == '"':
+        if value and value[-1] == '"':
             value = value[:-1]
 
+        # Convert to appropriate type
         if value.isdigit():
             value = int(value)
         elif value in AUDITD_NULL_VALUES:
             value = None
 
+        # Handle special keys
         match key:
             case 'res':
                 value = value.startswith('success')
@@ -457,11 +487,15 @@ def __parse_pam(msg_type: str, msg_parts: list) -> dict:
                 key = 'username'
             case 'UID' | 'ID':
                 # We're only concerned about logging the audit uid
+                i = j
                 continue
             case _:
                 pass
 
         event_data[key] = value
+
+        # Move to next key=value pair
+        i = j
 
     return event_data
 
