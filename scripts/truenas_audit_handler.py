@@ -35,6 +35,8 @@ AUDITD_LINE_SEPARATOR = '\x1d'
 AUDITD_NULL_VALUES = frozenset(['(null)', '(none)', '?', 'unset'])
 JSON_NULL = 'null'
 
+PAM_SPLIT_PATTERN = re.compile(r'(?=\b(?:grantors|acct|exe|hostname|addr|terminal|res|UID|AUID|ID|GID)=)')
+
 # TODO: generate critical middleware alert if our backlog starts to hit
 # critical levels
 ALERT_QUEUE_DEPTH = 1024
@@ -431,6 +433,20 @@ def __parse_tty(msg_parts: list, event_data: dict) -> dict:
 
 
 def __parse_pam(msg_type: str, raw_msg: str, msg_parts: list) -> dict:
+    """Parse audit messages related to PAM.
+    These include message types:
+    'USER_START' | 'USER_END' | 'USER_ACCT' | 'USER_AUTH' | 'USER_LOGIN' | 'USER_ERR' |
+    'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP'
+
+    Like all auditd messages, PAM messages start with a 'fixed' set of key=value pairs
+    and end with a variable set.
+
+    The delineator between the 'fixed' and 'variable' is a field that starts with `msg='op=`.
+    The processing of that field is handled by AuditMsgPamBase, the 'fixed field'
+    processor for PAM messages.
+
+    The remaining 'variable' fields are processed in this function."""
+
     event_data = {'event_type': AuditEvent.CREDENTIAL.upper(), 'auth_action': msg_type}
 
     for item in AuditMsgPamBase:
@@ -450,8 +466,7 @@ def __parse_pam(msg_type: str, raw_msg: str, msg_parts: list) -> dict:
 
     # Use regex to split on known field names - preserves spaces within values
     # Include UID, AUID, ID, GID to capture fields after the closing quote
-    pattern = r'(?=\b(?:grantors|acct|exe|hostname|addr|terminal|res|UID|AUID|ID|GID)=)'
-    variable_parts = re.split(pattern, op_msg)
+    variable_parts = PAM_SPLIT_PATTERN.split(op_msg)
 
     # Clean up: remove empty strings and strip whitespace
     variable_parts = [part.strip() for part in variable_parts if part.strip()]
