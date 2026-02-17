@@ -129,6 +129,19 @@ class AuditMsgPath(AuditMsgParser):
     OUID = (7, int)
     OGID = (8, int)
     RDEV = (9, str)
+    NAMETYPE = (10, str)
+
+
+class AuditMsgMissingPath(AuditMsgParser):
+    """
+    Parser for path type entry when file doesn't exist or can't be accessed.
+    In this case, inode, dev, mode, ouid, ogid, and rdev fields are missing.
+
+    Sample entry:
+    "type=PATH msg=audit(01/16/26 10:14:05.973:834) : item=0 name=/etc/exports.d nametype=UNKNOWN cap_fp=none cap_fi=none cap_fe=0 cap_fver=0 cap_frootid=0"  # noqa
+    """
+    NAME = (3, str)
+    NAMETYPE = (4, str)
 
 
 class AuditMsgProctitle(AuditMsgParser):
@@ -386,11 +399,24 @@ def __parse_cwd(msg_parts: list, event_data: dict) -> None:
 def __parse_path(msg_parts: list, paths: list) -> None:
     path_entry = {}
 
+    # Use inode field as discriminator. If the 4th element (index 4) starts
+    # with "inode=", this is a full PATH message. Otherwise, it's a PATH
+    # message for a missing/inaccessible file.
+    if len(msg_parts) > 4 and msg_parts[4].startswith('inode='):
+        msg_obj = AuditMsgPath
+    else:
+        msg_obj = AuditMsgMissingPath
+        diag_logger.warn("Watched directory is missing: %r", msg_parts[3])
+
     # deliberately leave off the item number from the line since it
     # can be inferred from array index.
-    for item in AuditMsgPath:
-        key, value = item.get_entry(msg_parts)
-        path_entry[key] = value
+    for item in msg_obj:
+        try:
+            key, value = item.get_entry(msg_parts)
+            path_entry[key] = value
+        except ValueError:
+            diag_logger.exception("unhandled format: %r", ' '.join(msg_parts))
+            path_entry[key] = "-unhandled formatting-"
 
     paths.append(path_entry)
 
@@ -875,7 +901,6 @@ class AuditdHandler:
 
             f.flush()
         diag_logger.info("Recovery file written successfully with %d messages", queue_len)
-
 
     def __read_recovery_file(self):
         # read our recovery file into the pending queue and then remove it.
