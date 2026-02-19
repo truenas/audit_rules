@@ -6,3 +6,6 @@
 -a exit,always -F arch=b64 -S execve -F path=/usr/sbin/shutdown -k escalation
 -a exit,always -F arch=b64 -S execve -F path=/usr/sbin/halt -k escalation
 -a exit,always -F arch=b64 -S execve -F path=/usr/bin/systemctl -F auid!=unset -k escalation
+
+## Quiet internal mw-worker authentications
+-A exclude,always -F msgtype=USER_AUTH -F auid=unset
