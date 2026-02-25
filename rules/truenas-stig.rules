@@ -6,3 +6,6 @@
 ## logs
 -a exit,always -F arch=b64 -F path=/var/log/nginx/access.log -F perm=wa -F auid!=unset -F euid!=33 -k escalation
 -a exit,always -F arch=b64 -F path=/var/log/nginx/error.log -F perm=wa -F auid!=unset -F euid!=33 -k escalation
+
+## Unauthorized write attempts to 'identity' files (or any file in /etc)
+-a always,exit -F arch=b64 -F dir=/etc -F perm=wa -F auid!=unset -k identity
