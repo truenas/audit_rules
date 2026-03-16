@@ -9,6 +9,9 @@ import os
 import re
 import signal
 import stat
+import time
+
+from truenas_api_client import Client
 
 from codecs import decode
 from dataclasses import dataclass, field
@@ -43,6 +46,10 @@ AUDITD_NULL_VALUES = frozenset(['(null)', '(none)', '?', 'unset'])
 JSON_NULL = 'null'
 
 PAM_SPLIT_PATTERN = re.compile(r'(?=\b(?:grantors|acct|exe|hostname|addr|terminal|res|UID|AUID|ID|GID)=)')
+
+ENTERPRISE_CHECK_TIMEOUT = 60    # seconds to retry initial middlewared connection
+ENTERPRISE_CHECK_INTERVAL = 2    # seconds between retries during initial check
+ENTERPRISE_RECHECK_INTERVAL = 300  # seconds between polls in the CE no-op loop
 
 # TODO: generate critical middleware alert if our backlog starts to hit
 # critical levels
@@ -1018,6 +1025,56 @@ class AuditdHandler:
         await self.loop.run_in_executor(None, self.__write_recovery_file)
 
 
+def _is_enterprise() -> bool | None:
+    """Single attempt to check enterprise status. Returns None on any error."""
+    try:
+        with Client() as c:
+            return c.call('system.is_enterprise')
+    except Exception:
+        return None
+
+
+def _wait_for_enterprise_on_startup() -> bool:
+    """
+    Retries enterprise check until middlewared responds or timeout expires.
+    Returns True (enterprise), False (CE), defaults to False on timeout.
+    """
+    deadline = time.monotonic() + ENTERPRISE_CHECK_TIMEOUT
+    while time.monotonic() < deadline:
+        result = _is_enterprise()
+        if result is not None:
+            diag_logger.info("Enterprise check: is_enterprise=%r", result)
+            return result
+        diag_logger.debug(
+            "Middlewared not yet available, retrying in %ds", ENTERPRISE_CHECK_INTERVAL
+        )
+        time.sleep(ENTERPRISE_CHECK_INTERVAL)
+
+    diag_logger.warning(
+        "Could not reach middlewared within %ds. Defaulting to CE (no-op).",
+        ENTERPRISE_CHECK_TIMEOUT
+    )
+    return False
+
+
+def _ce_noop_loop() -> None:
+    """
+    Block indefinitely on CE systems. Polls for a license periodically so
+    that if one is installed the handler activates without a manual restart.
+    Returns when system.is_enterprise becomes True.
+    """
+    diag_logger.info(
+        "Community Edition — kernel audit handler disabled. "
+        "Polling every %ds for enterprise license.", ENTERPRISE_RECHECK_INTERVAL
+    )
+    while True:
+        time.sleep(ENTERPRISE_RECHECK_INTERVAL)
+        result = _is_enterprise()
+        if result is True:
+            diag_logger.info("Enterprise license detected. Starting audit handler.")
+            return
+
+
 def __process_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=DESCRIPTION)
     parser.add_argument(
@@ -1056,6 +1113,10 @@ def main():
 
     # Set up module-level diagnostic logger before creating handler
     setup_diagnostic_logger()
+
+    if not _wait_for_enterprise_on_startup():
+        _ce_noop_loop()
+        # Falls through here only when a license is installed mid-run
 
     loop = asyncio.new_event_loop()
     handler = AuditdHandler(
