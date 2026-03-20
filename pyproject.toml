@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "truenas_audit"
+version = "0.1.0"
+description = "TrueNAS audit event parsing via libauparse"
+requires-python = ">=3.11"
+license = {text = "LGPL-3.0-or-later"}
+
+[project.scripts]
+truenas_audit_handler = "_truenas_audit_scripts.truenas_audit_handler:main"
