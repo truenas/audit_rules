@@ -2,12 +2,19 @@ Source: truenas-audit-rules
 Section: admin
 Priority: optional
 Maintainer: Andrew Walker <awalker@ixsystems.com>
-Build-Depends: debhelper-compat (= 12)
+Build-Depends: debhelper-compat (= 12),
+               dh-python,
+               pybuild-plugin-pyproject,
+               python3-all-dev,
+               python3-setuptools,
+               python3-build,
+               python3-installer,
+               libaudit-dev,
+               libauparse-dev
 Standards-Version: 4.4.0
 Homepage: http://www.truenas.com
 
 Package: truenas-audit-rules
 Architecture: any
-Depends: python3:any, truenas-files, ${misc:Depends}, ${shlibs:Depends}
-Description: Auditd rules for TrueNAS when STIG compatibiliy mode
- enabled.
+Depends: python3:any, truenas-files, ${misc:Depends}, ${shlibs:Depends}, ${python3:Depends}
+Description: Auditd rules and audit event handler for TrueNAS

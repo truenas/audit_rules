@@ -1,27 +1,31 @@
 #!/usr/bin/python3
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) TrueNAS, 2026
 
 import argparse
 import asyncio
-import enum
 import logging
 import logging.handlers
 import os
-import re
 import signal
 import stat
+import time
 
-from codecs import decode
-from dataclasses import dataclass, field
-from datetime import datetime
-from collections import defaultdict, deque
-from json import dumps
+from truenas_api_client import Client
+
+from collections import deque
 from middlewared.logger import (
     TNSyslogHandler, TNLog, DEFAULT_LOGFORMAT, AUDIT_HANDLER_LOGFILE, QFORMATTER
 )
 import socket
 from queue import Queue
-from random import getrandbits
-from uuid import UUID
+
+import truenas_auparse
+from truenas_audit_parse import (
+    audit_entry_to_json, classify_event,
+)
+from truenas_audit_parse.constants import AUDITD_LINE_SEPARATOR
+from truenas_audit_parse.event_types import AuditMsgEventType
 
 
 DESCRIPTION = (
@@ -38,11 +42,10 @@ DEFAULT_RECOVERY_FILE = '/var/run/middleware/.auditd_handler.recovery'
 diag_logger = None
 DEFAULT_DIAG_SYSLOG_SOCK = '/dev/log'
 SYSLOG_IDENT = 'TNAUDIT_SYSTEM: '
-AUDITD_LINE_SEPARATOR = '\x1d'
-AUDITD_NULL_VALUES = frozenset(['(null)', '(none)', '?', 'unset'])
-JSON_NULL = 'null'
 
-PAM_SPLIT_PATTERN = re.compile(r'(?=\b(?:grantors|acct|exe|hostname|addr|terminal|res|UID|AUID|ID|GID)=)')
+ENTERPRISE_CHECK_TIMEOUT = 60    # seconds to retry initial middlewared connection
+ENTERPRISE_CHECK_INTERVAL = 2    # seconds between retries during initial check
+ENTERPRISE_RECHECK_INTERVAL = 300  # seconds between polls in the CE no-op loop
 
 # TODO: generate critical middleware alert if our backlog starts to hit
 # critical levels
@@ -58,629 +61,6 @@ AUDIT_HANDLER_LOG = TNLog(
     logformat=DEFAULT_LOGFORMAT,
     pending_maxlen=1024
 )
-
-
-class AuditMsgParser(enum.Enum):
-    @property
-    def idx(self) -> int:
-        return self.value[0]
-
-    @property
-    def data_type(self) -> type:
-        return self.value[1]
-
-    def get_entry(self, data: list[str]) -> tuple:
-        key, value = data[self.idx].split('=', 1)
-        if self.data_type is str:
-            # possibly strip leading and trailing quotes
-            if value[0] == '"':
-                value = value[1:]
-            if value[-1] == '"':
-                value = value[:-1]
-
-            # We may have literal string denoting a NULL value change back to
-            # python None type, which will then be encoded as JSON NULL when
-            # encoded for DB insertion.
-            if value in AUDITD_NULL_VALUES:
-                value = None
-
-            return (key, value)
-
-        elif self.data_type is bool:
-            return (key, value == "yes")
-
-        return (key, int(value))
-
-
-class AuditMsgBase(AuditMsgParser):
-    TYPE = (0, str)
-    ID = (1, str)
-
-    def get_entry(self, data: list[str]) -> tuple:
-        if self is AuditMsgBase.TYPE:
-            return super().get_entry(data)
-
-        key, value = data[self.idx].split('=', 1)
-        # ID has a trailing colon ":" that needs to be stripped
-        return (key, value[0: -1])
-
-
-def get_msg_type(data: list[str]) -> str:
-    key, value = AuditMsgBase.TYPE.get_entry(data)
-    return value
-
-
-def get_msg_id(data: list[str]) -> str:
-    key, value = AuditMsgBase.ID.get_entry(data)
-    return value
-
-
-class AuditMsgPath(AuditMsgParser):
-    """
-    Parser for path type entry
-
-    Sample entry:
-    "type=PATH msg=audit(1734547436.320:852): item=1 name=\"/usr/local/libexec/disable-rootfs-protection\" inode=46471 dev=00:23 mode=0100755 ouid=0 ogid=0 rdev=00:00 nametype=NORMAL cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0 OUID=\"root\" OGID=\"root\""  # noqa
-    """
-    NAME = (3, str)
-    INODE = (4, int)
-    DEV = (5, str)
-    MODE = (6, str)
-    OUID = (7, int)
-    OGID = (8, int)
-    RDEV = (9, str)
-    NAMETYPE = (10, str)
-
-
-class AuditMsgMissingPath(AuditMsgParser):
-    """
-    Parser for path type entry when file doesn't exist or can't be accessed.
-    In this case, inode, dev, mode, ouid, ogid, and rdev fields are missing.
-
-    Sample entry:
-    "type=PATH msg=audit(01/16/26 10:14:05.973:834) : item=0 name=/etc/exports.d nametype=UNKNOWN cap_fp=none cap_fi=none cap_fe=0 cap_fver=0 cap_frootid=0"  # noqa
-    """
-    NAME = (3, str)
-    NAMETYPE = (4, str)
-
-
-class AuditMsgProctitle(AuditMsgParser):
-    """
-    Parser for PROCTITLE type messages
-
-    Sample entry:
-    "type=PROCTITLE msg=audit(1734547436.320:852): proctitle=2F7573722F62696E2F707974686F6E33002F7573722F6C6F63616C2F6C6962657865632F64697361626C652D726F6F7466732D70726F74656374696F6E"  # noqa
-    """
-    PROCTITLE = (2, str)
-
-    def get_entry(self, data: list[str]) -> tuple:
-        key, value = super().get_entry(data)
-
-        # Although userspace library guidelines state to hex-encode this value
-        # some libaudit consumers break (notably pam_tty_audit) break this expectation.
-        # If we fail to decode simply put original string in message.
-        try:
-            proc = decode(value, 'hex').decode().replace('\x00', ' ')
-        except Exception:
-            proc = value
-
-        return (key, proc)
-
-
-class AuditMsgCwd(AuditMsgParser):
-    """
-    Parser for CWD type messages
-
-    Sample entry:
-    "type=CWD msg=audit(1734547436.320:852): cwd=\"/root\""
-    """
-    CWD = (2, str)
-
-
-class AuditMsgSyscall(AuditMsgParser):
-    """
-    Parser for SYSCALL type messages
-
-    Sample entry:
-    "type=SYSCALL msg=audit(1734547436.320:852): arch=c000003e syscall=59 success=yes exit=0 a0=7fb27f458c70 a1=7fb27f458ce0 a2=56289c566760 a3=8 items=4 ppid=10424 pid=11969 auid=0 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=pts2 ses=12 comm=\"disable-rootfs-\" exe=\"/usr/bin/python3.11\" subj=unconfined key=\"escalation\" ARCH=x86_64 SYSCALL=execve AUID=\"root\" UID=\"root\" GID=\"root\" EUID=\"root\" SUID=\"root\" FSUID=\"root\" EGID=\"root\" SGID=\"root\" FSGID=\"root\"  # noqa
-    """
-    SUCCESS = (4, bool)
-    EXIT = (5, int)
-    PPID = (11, int)
-    PID = (12, int)
-    AUID = (13, int)
-    UID = (14, int)
-    GID = (15, int)
-    EUID = (16, int)
-    SUID = (17, int)
-    FSUID = (18, int)
-    EGID = (19, int)
-    SGID = (20, int)
-    FSGID = (21, int)
-    TTY = (22, str)
-    SES = (23, int)
-    KEY = (27, str)
-    SYSCALL_STR = (29, str)
-    AUID_STR = (30, str)
-    UID_STR = (31, str)
-    GID_STR = (32, str)
-
-
-class AuditMsgSyscallNoRval(AuditMsgParser):
-    """
-    Some syscall entries do not have a proper exit code
-
-    Sample entry:
-    type=SYSCALL msg=audit(1735072331.659:2032): arch=c000003e syscall=231 a0=0 a1=e7 a2=3c a3=7ffd914e4b20 items=0 ppid=42401 pid=42411 auid=0 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=pts1 ses=33 comm="zsh" exe="/usr/bin/zsh" subj=unconfined key=(null) ARCH=x86_64 SYSCALL=exit_group AUID="root" UID="root" GID="root" EUID="root" SUID="root" FSUID="root" EGID="root" SGID="root" FSGID="root"  # noqa
-    """
-    PPID = (9, int)
-    PID = (10, int)
-    AUID = (11, int)
-    UID = (12, int)
-    GID = (13, int)
-    EUID = (14, int)
-    SUID = (15, int)
-    FSUID = (16, int)
-    EGID = (17, int)
-    SGID = (18, int)
-    FSGID = (19, int)
-    TTY = (20, str)
-    SES = (21, int)
-    EXE = (23, str)
-    KEY = (25, str)
-    SYSCALL_STR = (27, str)
-    AUID_STR = (28, str)
-    UID_STR = (29, str)
-    GID_STR = (30, str)
-
-
-class AuditMsgLogin(AuditMsgParser):
-    """
-    Parser for LOGIN type messages
-
-    Sample entry:
-    type=LOGIN msg=audit(1735069956.674:1968): pid=38804 uid=0 subj=unconfined old-auid=4294967295 auid=0 tty=(none) old-ses=4294967295 ses=28 res=1 UID="root" OLD-AUID="unset" AUID="root"  # noqa
-    """
-    OLD_AUID = (5, int)
-    NEW_AUID = (6, int)
-    TTY = (7, str)
-    OLD_SES = (8, int)
-    NEW_SES = (9, int)
-    RES = (10, int)
-
-
-class AuditMsgService(AuditMsgParser):
-    """
-    Parser for SERVICE_START and SERVICE_STOP messages
-
-    Sample entry:
-    "type=SERVICE_START msg=audit(1736973663.599:429): pid=1 uid=0 auid=4294967295 ses=4294967295 subj=unconfined msg='unit=smbd comm=\"systemd\" exe=\"/usr/lib/systemd/systemd\" hostname=? addr=? terminal=? res=success' UID=\"root\" AUID=\"unset\""  # noqa
-    """
-    SUBJ = (6, str)
-    UNIT = (7, str)
-    COMM = (8, str)
-    EXE = (9, str)
-    RES = (13, str)
-
-    def get_entry(self, data: list[str]) -> tuple:
-        key, value = super().get_entry(data)
-        match self:
-            case AuditMsgService.UNIT:
-                value = value.split('=', 1)[1]
-                key = 'unit'
-            case AuditMsgService.RES:
-                value = 'success' in value
-            case _:
-                pass
-
-        return (key, value)
-
-
-class AuditMsgPamBase(AuditMsgParser):
-    """
-    Parser for messsages associated with PAM
-
-    Sample entry:
-    type=CRED_DISP msg=audit(1738184696.902:276470): pid=1389074 uid=0 auid=4294967295 ses=4294967295 subj=unconfined msg='op=PAM:setcred grantors=pam_rootok acct="truenas_admin" exe="/usr/bin/su" hostname=? addr=? terminal=/dev/pts/0 res=success'
-    """
-    PID = (2, int)
-    FUNCTION = (7, str)
-
-    def get_entry(self, data: list[str]) -> tuple:
-        key, value = super().get_entry(data)
-        if self is AuditMsgPamBase.FUNCTION:
-            value = value.split('=', 1)[1]
-            key = 'function'
-
-        return (key, value)
-
-
-class AuditMsgTty(AuditMsgParser):
-    """
-    pam_tty_audit generates unique multi-part messages.
-
-    Sample entry:
-    type=TTY msg=audit(1737410962.644:698): tty pid=28250 uid=0 auid=0 ses=16 major=136 minor=1 comm="zsh" data=6666667F7F7F7F657869740AUID="root" AUID="root"  # noqa
-    """
-    PID = (3, int)
-    UID = (4, int)
-    SES = (6, int)
-    MAJOR = (7, int)
-    MINOR = (8, int)
-    COMM = (9, str)
-    DATA = (10, str)
-    AUID_STR = (11, str)
-
-    def get_entry(self, data: list[str]) -> tuple:
-        key, value = super().get_entry(data)
-        match self:
-            case AuditMsgTty.DATA:
-                value = value.split('AUID')[0]
-            case AuditMsgTty.AUID_STR:
-                key = 'username'
-
-        return (key, value)
-
-
-class AuditMsgEventType(enum.StrEnum):
-    LOGIN = 'LOGIN'
-    PROCTITLE = 'PROCTITLE'
-    PATH = 'PATH'
-    CWD = 'CWD'
-    EXECVE = 'EXECVE'
-    SYSCALL = 'SYSCALL'
-    CONFIG_CHANGE = 'CONFIG_CHANGE'
-    EOE = 'EOE'
-    BPF = 'BPF'
-    TTY = 'TTY'
-
-
-class AuditEvent(enum.StrEnum):
-    PRIVILEGED = 'privileged'
-    ESCALATION = 'escalation'
-    EXPORT = 'export'
-    IDENTITY = 'identity'
-    TIMECHANGE = 'time-change'
-    MODULE = 'module-load'
-    # Items below are not set as keys
-    GENERIC = 'generic'
-    LOGIN = 'login'
-    SERVICE = 'service'
-    CREDENTIAL = 'credential'
-    TTY_RECORD = 'tty_record'
-
-
-def get_audit_event(parts: list[str]) -> AuditEvent | None:
-    # only syscall events will have the key loaded
-    if get_msg_type(parts) != 'SYSCALL':
-        return None
-
-    # Some syscalls may not have a return value in the audit entry
-    # The simplest way to determine which type of record we have is to
-    # read the beginning the string at the SUCCESS offset.
-    if not parts[AuditMsgSyscall.SUCCESS.idx].startswith('success'):
-        msg_obj = AuditMsgSyscallNoRval
-    else:
-        msg_obj = AuditMsgSyscall
-
-    key, value = msg_obj.KEY.get_entry(parts)
-    if value is None:
-        return AuditEvent.GENERIC
-
-    return AuditEvent(value)
-
-
-@dataclass(slots=True)
-class AUDITEntry:
-    event_type: AuditEvent | None = None
-    key_event: str | None = None
-    raw_lines: list[str] = field(default_factory=list)
-
-
-MULTIPART_EVENT = frozenset([
-    AuditMsgEventType.PROCTITLE,
-    AuditMsgEventType.PATH,
-    AuditMsgEventType.CWD,
-    AuditMsgEventType.EXECVE,
-    AuditMsgEventType.SYSCALL,
-    AuditMsgEventType.CONFIG_CHANGE,
-    AuditMsgEventType.EOE,
-    AuditMsgEventType.BPF,
-    AuditMsgEventType.LOGIN,
-    AuditMsgEventType.TTY,
-])
-
-
-def __parse_cwd(msg_parts: list, event_data: dict) -> None:
-    key, cwd = AuditMsgCwd.CWD.get_entry(msg_parts)
-    event_data['cwd'] = cwd
-
-
-def __parse_path(msg_parts: list, paths: list) -> None:
-    path_entry = {}
-
-    # Use inode field as discriminator. If the 4th element (index 4) starts
-    # with "inode=", this is a full PATH message. Otherwise, it's a PATH
-    # message for a missing/inaccessible file.
-    if len(msg_parts) > 4 and msg_parts[4].startswith('inode='):
-        msg_obj = AuditMsgPath
-    else:
-        msg_obj = AuditMsgMissingPath
-        diag_logger.warn("Watched directory is missing: %r", msg_parts[3])
-
-    # deliberately leave off the item number from the line since it
-    # can be inferred from array index.
-    for item in msg_obj:
-        try:
-            key, value = item.get_entry(msg_parts)
-            path_entry[key] = value
-        except ValueError:
-            diag_logger.exception("unhandled format: %r", ' '.join(msg_parts))
-            path_entry[key] = "-unhandled formatting-"
-
-    paths.append(path_entry)
-
-
-def __parse_proctitle(msg_parts: list, event_data: dict) -> None:
-    key, proctitle = AuditMsgProctitle.PROCTITLE.get_entry(msg_parts)
-    event_data['proctitle'] = proctitle
-
-
-def __parse_syscall(msg_parts: list, event_data: dict) -> None:
-    if event_data.get('syscall') is not None:
-        return
-
-    event_data['syscall'] = {}
-
-    # Some syscalls may not have a return value in the audit entry
-    # The simplest way to determine which type of record we have is to
-    # read the beginning the string at the SUCCESS offset.
-    if not msg_parts[AuditMsgSyscall.SUCCESS.idx].startswith('success'):
-        msg_obj = AuditMsgSyscallNoRval
-    else:
-        msg_obj = AuditMsgSyscall
-
-    for item in msg_obj:
-        key, value = item.get_entry(msg_parts)
-        event_data['syscall'][key] = value
-
-
-def __parse_login(msg_parts: list) -> dict:
-    event_data = {'event_type': AuditEvent.LOGIN.upper()}
-
-    for item in AuditMsgLogin:
-        key, value = item.get_entry(msg_parts)
-        event_data[key] = value
-
-    return event_data
-
-
-def __parse_service(msg_type: str, msg_parts: list) -> dict:
-    event_data = {'event_type': AuditEvent.SERVICE.upper(), 'service_action': msg_type}
-
-    for item in AuditMsgService:
-        key, value = item.get_entry(msg_parts)
-        event_data[key] = value
-
-    return event_data
-
-
-def __parse_tty(msg_parts: list, event_data: dict) -> dict:
-    event_data['event_type'] = AuditEvent.TTY_RECORD.upper()
-    event_data['tty_record'] = {}
-
-    for item in AuditMsgTty:
-        key, value = item.get_entry(msg_parts)
-        event_data['tty_record'][key] = value
-
-    return event_data
-
-
-def __parse_pam(msg_type: str, raw_msg: str, msg_parts: list) -> dict:
-    """Parse audit messages related to PAM.
-    These include message types:
-    'USER_START' | 'USER_END' | 'USER_ACCT' | 'USER_AUTH' | 'USER_LOGIN' | 'USER_ERR' |
-    'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP'
-
-    Like all auditd messages, PAM messages start with a 'fixed' set of key=value pairs
-    and end with a variable set.
-
-    The delineator between the 'fixed' and 'variable' is a field that starts with `msg='op=`.
-    The processing of that field is handled by AuditMsgPamBase, the 'fixed field'
-    processor for PAM messages.
-
-    The remaining 'variable' fields are processed in this function."""
-
-    event_data = {'event_type': AuditEvent.CREDENTIAL.upper(), 'auth_action': msg_type}
-
-    for item in AuditMsgPamBase:
-        key, value = item.get_entry(msg_parts)
-        event_data[key] = value
-
-    # Extract op_msg from raw string - everything after the function field
-    function_part = msg_parts[AuditMsgPamBase.FUNCTION.idx]
-    function_idx = raw_msg.find(function_part)
-
-    if function_idx == -1:
-        return event_data
-
-    # Extract variable section from raw message
-    op_msg_start = function_idx + len(function_part)
-    op_msg = raw_msg[op_msg_start:].strip()
-
-    # Use regex to split on known field names - preserves spaces within values
-    # Include UID, AUID, ID, GID to capture fields after the closing quote
-    variable_parts = PAM_SPLIT_PATTERN.split(op_msg)
-
-    # Clean up: remove empty strings and strip whitespace
-    variable_parts = [part.strip() for part in variable_parts if part.strip()]
-
-    # Process each key=value pair
-    for item in variable_parts:
-        if '=' not in item:
-            continue
-
-        # Split on first '=' only
-        key, value = item.split('=', 1)
-
-        # Strip quotes if present (both double quotes and single quotes)
-        if value:
-            if value[0] == '"':
-                value = value[1:]
-            if value[-1] == '"':
-                value = value[:-1]
-            # Strip trailing single quote from closing msg quote (e.g., "success'" -> "success")
-            if value[-1] == "'":
-                value = value[:-1]
-
-        # Convert to appropriate type
-        if value.isdigit():
-            value = int(value)
-        elif value in AUDITD_NULL_VALUES:
-            value = None
-
-        # Handle special keys
-        match key:
-            case 'res':
-                value = value.startswith('success')
-            case 'AUID':
-                key = 'username'
-            case 'UID' | 'ID':
-                # We're only concerned about logging the audit uid
-                continue
-            case _:
-                pass
-
-        event_data[key] = value
-
-    return event_data
-
-
-def __parse_raw_msg(msg: str, event_data: dict):
-    # We can include inferred items in our entry
-    parts = msg.split()
-    msg_type = get_msg_type(parts)
-
-    match msg_type:
-        case 'PATH':
-            return __parse_path(parts, event_data['paths'])
-        case 'PROCTITLE':
-            return __parse_proctitle(parts, event_data)
-        case 'CWD':
-            return __parse_cwd(parts, event_data)
-        case 'SYSCALL':
-            return __parse_syscall(parts, event_data)
-        # Below this point are single-part events that return customized
-        # Event data
-        case 'LOGIN':
-            return __parse_login(parts)
-        case 'SERVICE_START' | 'SERVICE_STOP':
-            return __parse_service(msg_type, parts)
-        case 'USER_START' | 'USER_END' | 'USER_ACCT' | 'USER_AUTH' | 'USER_LOGIN' | 'USER_ERR':
-            return __parse_pam(msg_type, msg, parts)
-        case 'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP':
-            return __parse_pam(msg_type, msg, parts)
-        case 'TTY':
-            return __parse_tty(parts, event_data)
-        case _:
-            pass
-
-
-def __generate_event_data(
-    entry: AUDITEntry,
-    data_out: dict
-) -> None:
-
-    data_out['event'] = data_out['event'].upper()
-    raw_lines = entry.raw_lines
-
-    if entry.key_event:
-        key, user = AuditMsgSyscall.UID_STR.get_entry(entry.key_event)
-        data_out['user'] = user
-
-        key, success = AuditMsgSyscall.SUCCESS.get_entry(entry.key_event)
-        data_out['success'] = success
-        data_out['event_data']['raw_lines'] = None
-
-    for item in raw_lines:
-        if (new_event_data := __parse_raw_msg(item, data_out['event_data'])) is not None:
-            # If event is GENERIC then the entry is defaulted and we can
-            # overwrite safely without losing info
-            if data_out['event'] == AuditEvent.GENERIC.upper():
-                data_out['event_data'] = new_event_data
-                data_out['event'] = data_out['event_data'].pop('event_type')
-
-            # This in principle shouldn't happen but to be on safe side we merge
-            # event data
-            else:
-                new_event_data.pop('event_type')
-                data_out['event_data'] |= new_event_data
-
-            if (username := new_event_data.get('username') or new_event_data.get('acct')) is not None:
-                if not data_out['user']:
-                    data_out['user'] = username
-
-            if (addr := new_event_data.get('addr')) and data_out['addr'] == '127.0.0.1':
-                data_out['addr'] = addr
-
-            if (res := new_event_data.get('res')) is not None:
-                if isinstance(res, bool):
-                    data_out['success'] = res
-
-
-def __parse_msgid(msgid: str, entry_data: dict):
-    """
-    msgid is string such as audit(1734419821.939:3615). The part before the `:`
-    character is a timestamp and the part after it is the audit event id.
-    We need to convert this string into a UUID for the audit event.
-
-    Unfortunately the audit event id is only an unsigned int, and so it's not
-    actually universally unique and potentialy not unique over time.
-
-    We convert this into a UUID by moving the timestamp to upper 64 bits of a
-    128 bit integer, using the audit event id as the bottom 32 bits, and then
-    placing random 32 bits in the middle of it.
-    """
-    msgid = msgid.split('(')[1].strip(')')
-    timestamp, eventid = msgid.split(':')
-    ts_datetime = datetime.fromtimestamp(float(timestamp))
-
-    upper_64 = int(timestamp.replace('.', '')) << 64
-    lower_32 = int(eventid)
-    mid_32 = getrandbits(32) << 32
-
-    entry_data['time'] = ts_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')
-    entry_data['aid'] = str(UUID(int=upper_64 + lower_32 + mid_32))
-
-
-def audit_entry_to_json(msgid: str, entry: AUDITEntry) -> str:
-    to_write = {'TNAUDIT': {
-        'aid': None,
-        'vers': {'major': 0, 'minor': 1},
-        'addr': '127.0.0.1',
-        'user': None,
-        'sess': None,
-        'time': None,
-        'svc': 'SYSTEM',
-        'svc_data': JSON_NULL,  # per our NEP null is OK here
-        'event': entry.event_type or AuditEvent.GENERIC,
-        'event_data': {
-            'audit_msg_id_str': msgid,
-            'proctitle': None,
-            'syscall': None,
-            'cwd': None,
-            'paths': [],
-            'raw_lines': entry.raw_lines
-        },
-        'success': True
-    }}
-
-    __parse_msgid(msgid, to_write['TNAUDIT'])
-    __generate_event_data(entry, to_write['TNAUDIT'])
-
-    to_write['TNAUDIT']['event_data'] = dumps(to_write['TNAUDIT']['event_data'])
-
-    return '@cee:' + dumps(to_write)
 
 
 class DevLogSyslogHandler(logging.handlers.SysLogHandler):
@@ -864,9 +244,9 @@ class AuditdHandler:
         self.diag_queue_listener = None
         self.audis_reader = None
         self.audis_writer = None
-        self.partial_records = defaultdict(AUDITEntry)
         self.pending_queue = deque()
         self.__setup_logger()
+        self.auparse_ctx = truenas_auparse.AuparseContext(callback=self._on_event_ready)
         self.__read_recovery_file()
 
     def __setup_logger(self) -> logging.Logger:
@@ -940,12 +320,30 @@ class AuditdHandler:
             diag_logger.exception("Failed to connect to audispd socket.")
             raise
 
-    async def send_completed(self, msgid: str, data: AUDITEntry) -> None:
-        json_data = audit_entry_to_json(msgid, data)
+    def _on_event_ready(self, event: dict):
+        """Called synchronously from C callback when a complete event is assembled."""
+        msgid = event.get('msgid', '')
+        raw_lines = event.get('raw_lines', [])
+        event_type = classify_event(event)
+
+        key_event_parts = None
+        for record in event.get('records', []):
+            if record.get('type_name') == AuditMsgEventType.SYSCALL:
+                key = record.get('fields', {}).get('key')
+                if key and key not in ('(null)', '(none)', '?', 'unset'):
+                    # Find matching raw line for key_event_parts
+                    for raw_line in raw_lines:
+                        if raw_line.startswith(f'type={AuditMsgEventType.SYSCALL} '):
+                            key_event_parts = raw_line.split()
+                            break
+                break
+
+        json_data = audit_entry_to_json(
+            msgid, event_type, raw_lines, key_event_parts, parsed=event
+        )
         self.logger.critical(json_data)
 
     async def parse_audit_line(self, line: bytes):
-        # decode and strip off trailing newline character
         try:
             decoded = line.decode()[0:-1]
         except Exception:
@@ -957,42 +355,23 @@ class AuditdHandler:
 
         decoded = decoded.replace(AUDITD_LINE_SEPARATOR, ' ')
 
-        parts = decoded.split()
-        msgid = get_msg_id(parts)
-        msgtype = get_msg_type(parts)
-
-        if msgtype not in MULTIPART_EVENT:
-            return (msgid, AUDITEntry(raw_lines=[decoded]))
-
-        # Keep adding to raw_lines until we get an End of Event (EOE) message.
-        entry = self.partial_records[msgid]
-        entry.raw_lines.append(decoded)
-
-        # prioritize line with the identifier key
-        if (audit_event := get_audit_event(parts)) is not None:
-            entry.event_type = audit_event
-            entry.key_event = parts
-
-        if msgtype != AuditMsgEventType.EOE:
-            # Incomplete message. We store in `partial_records` dictionary
-            # until it is completed.
-            return None
-
-        return (msgid, self.partial_records.pop(msgid))
+        try:
+            self.auparse_ctx.feed(decoded)
+        except Exception:
+            diag_logger.exception("Failed to feed line to auparse context.")
 
     async def handle_auditd_msg(self):
         # Auditd messages are newline-terminated
         data = await self.audis_reader.readline()
-        if (completed := await self.parse_audit_line(data)) is not None:
-            await self.send_completed(*completed)
+        await self.parse_audit_line(data)
 
-            # Monitor pending queue depth and warn if getting high
-            # TODO: Add alert messages
-            queue_depth = len(self.pending_queue)
-            if queue_depth >= ALERT_QUEUE_DEPTH:
-                diag_logger.critical("Pending queue depth critical: %d messages queued", queue_depth)
-            elif queue_depth >= ALERT_QUEUE_DEPTH * 0.75:
-                diag_logger.warning("Pending queue depth high: %d messages queued", queue_depth)
+        # Monitor pending queue depth and warn if getting high
+        # TODO: Add alert messages
+        queue_depth = len(self.pending_queue)
+        if queue_depth >= ALERT_QUEUE_DEPTH:
+            diag_logger.critical("Pending queue depth critical: %d messages queued", queue_depth)
+        elif queue_depth >= ALERT_QUEUE_DEPTH * 0.75:
+            diag_logger.warning("Pending queue depth high: %d messages queued", queue_depth)
 
     def __setup_signal_handlers(self):
         self.loop.add_signal_handler(signal.SIGTERM, self.terminate)
@@ -1016,6 +395,56 @@ class AuditdHandler:
         # a good state. Write out the recovery file and hope for happier
         # times after a service restart.
         await self.loop.run_in_executor(None, self.__write_recovery_file)
+
+
+def _is_enterprise() -> bool | None:
+    """Single attempt to check enterprise status. Returns None on any error."""
+    try:
+        with Client() as c:
+            return c.call('system.is_enterprise')
+    except Exception:
+        return None
+
+
+def _wait_for_enterprise_on_startup() -> bool:
+    """
+    Retries enterprise check until middlewared responds or timeout expires.
+    Returns True (enterprise), False (CE), defaults to False on timeout.
+    """
+    deadline = time.monotonic() + ENTERPRISE_CHECK_TIMEOUT
+    while time.monotonic() < deadline:
+        result = _is_enterprise()
+        if result is not None:
+            diag_logger.info("Enterprise check: is_enterprise=%r", result)
+            return result
+        diag_logger.debug(
+            "Middlewared not yet available, retrying in %ds", ENTERPRISE_CHECK_INTERVAL
+        )
+        time.sleep(ENTERPRISE_CHECK_INTERVAL)
+
+    diag_logger.warning(
+        "Could not reach middlewared within %ds. Defaulting to CE (no-op).",
+        ENTERPRISE_CHECK_TIMEOUT
+    )
+    return False
+
+
+def _ce_noop_loop() -> None:
+    """
+    Block indefinitely on CE systems. Polls for a license periodically so
+    that if one is installed the handler activates without a manual restart.
+    Returns when system.is_enterprise becomes True.
+    """
+    diag_logger.info(
+        "Community Edition — kernel audit handler disabled. "
+        "Polling every %ds for enterprise license.", ENTERPRISE_RECHECK_INTERVAL
+    )
+    while True:
+        time.sleep(ENTERPRISE_RECHECK_INTERVAL)
+        result = _is_enterprise()
+        if result is True:
+            diag_logger.info("Enterprise license detected. Starting audit handler.")
+            return
 
 
 def __process_args() -> argparse.Namespace:
@@ -1056,6 +485,10 @@ def main():
 
     # Set up module-level diagnostic logger before creating handler
     setup_diagnostic_logger()
+
+    if not _wait_for_enterprise_on_startup():
+        _ce_noop_loop()
+        # Falls through here only when a license is installed mid-run
 
     loop = asyncio.new_event_loop()
     handler = AuditdHandler(
