@@ -62,6 +62,12 @@ AUDIT_HANDLER_LOG = TNLog(
     pending_maxlen=1024
 )
 
+F = open('/var/log/audit/audump.txt', 'wb')
+
+def write_msg(msg):
+    F.write(msg + b'\n')
+    F.flush()
+
 
 class DevLogSyslogHandler(logging.handlers.SysLogHandler):
     """
@@ -363,6 +369,7 @@ class AuditdHandler:
     async def handle_auditd_msg(self):
         # Auditd messages are newline-terminated
         data = await self.audis_reader.readline()
+        write_msg(data)
         await self.parse_audit_line(data)
 
         # Monitor pending queue depth and warn if getting high
