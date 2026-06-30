@@ -92,7 +92,7 @@ parse_record_fields(auparse_state_t *au)
 		 * quoted strings for resolved UID-type fields (e.g.
 		 * "sharinguser" instead of sharinguser). Strip the outer
 		 * double-quotes so consumers get bare values matching the
-		 * old hand-rolled parser's behaviour.
+		 * old hand-rolled parser's behavior.
 		 */
 		fv_len = strlen(field_value);
 		if (fv_len >= 2 &&
