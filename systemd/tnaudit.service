@@ -8,7 +8,7 @@ After=auditd.service
 
 [Service]
 Type=exec
-ExecStart=/usr/local/libexec/truenas_audit_handler.py
+ExecStart=/usr/bin/truenas_audit_handler
 SendSIGKILL=no
 MemoryDenyWriteExecute=true
 LockPersonality=true

@@ -1,23 +1,15 @@
 #!/usr/bin/make -f
-#export DH_VERBOSE = 1
+export PYBUILD_NAME=truenas_audit
+export PYBUILD_SYSTEM=pyproject
 
 %:
-	dh $@
+	dh $@ --with python3 --buildsystem=pybuild
 
 override_dh_auto_install:
-	sh -c "\
-		mkdir -p debian/truenas-audit-rules/conf/audit_rules/; \
-		cp -a rules/* debian/truenas-audit-rules/conf/audit_rules/; \
-		mkdir -p debian/truenas-audit-rules/conf/audit_plugins/; \
-		cp -a plugins/* debian/truenas-audit-rules/conf/audit_plugins/; \
-		mkdir -p debian/truenas-audit-rules/usr/local/libexec/; \
-		cp -a scripts/* debian/truenas-audit-rules/usr/local/libexec/; \
-		mkdir -p debian/truenas-audit-rules/lib/systemd/system/; \
-		cp -a systemd/* debian/truenas-audit-rules/lib/systemd/system/; \
-	"
-
-override_dh_fixperms:
-
-override_dh_shlibdeps:
-
-override_dh_usrlocal:
+	dh_auto_install
+	mkdir -p debian/truenas-audit-rules/conf/audit_rules/
+	cp -a rules/* debian/truenas-audit-rules/conf/audit_rules/
+	mkdir -p debian/truenas-audit-rules/conf/audit_plugins/
+	cp -a plugins/* debian/truenas-audit-rules/conf/audit_plugins/
+	mkdir -p debian/truenas-audit-rules/lib/systemd/system/
+	cp -a systemd/* debian/truenas-audit-rules/lib/systemd/system/

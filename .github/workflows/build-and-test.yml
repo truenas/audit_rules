@@ -1,0 +1,38 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            debhelper \
+            dh-python \
+            pybuild-plugin-pyproject \
+            python3-all-dev \
+            python3-setuptools \
+            python3-build \
+            python3-installer \
+            python3-pytest \
+            libaudit-dev \
+            libauparse-dev
+
+      - name: Build debian package
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Install debian package
+        run: sudo dpkg --force-depends -i ../truenas-audit-rules_*.deb
+
+      - name: Run tests
+        run: python3 -m pytest tests/ -v
