@@ -179,23 +179,35 @@ class TestAuparseContext:
         assert len(events) == 1
 
     def test_next_event_triggers_previous(self):
-        """Feeding a new event finalizes the previously buffered event."""
+        """Feeding a subsequent event finalizes the previously buffered one.
+
+        Whether libauparse also emits the new single-record event immediately
+        (libauparse 3.x) or holds it until the next record/flush (4.x) is
+        version-dependent, so assert only the version-independent invariant:
+        the earlier SYSCALL event is delivered once a later event arrives, and
+        flush() drains everything exactly once.
+        """
         events = []
         ctx = truenas_auparse.AuparseContext(callback=events.append)
 
-        # First event
+        # First event stays buffered until a later record or a flush arrives.
         ctx.feed(SAMPLE_SYSCALL)
         ctx.feed(SAMPLE_EOE)
         assert len(events) == 0
 
-        # Feeding the next event (different msgid) lets libauparse finalize the
-        # previous SYSCALL event. The new LOGIN record stays buffered until the
-        # following event arrives or the parser is flushed.
+        # Feeding the next event (different msgid) finalizes the previous
+        # SYSCALL event. libauparse may also emit the LOGIN event here, so
+        # don't pin the exact count -- just require the SYSCALL was delivered.
         ctx.feed(SAMPLE_LOGIN)
-        assert len(events) == 1
+        assert len(events) >= 1
+        assert events[0]['msgid'] == 'audit(1734547436.320:852)'
 
+        # Flushing drains any still-buffered event; both arrive exactly once.
         ctx.flush()
-        assert len(events) == 2
+        assert [e['msgid'] for e in events] == [
+            'audit(1734547436.320:852)',
+            'audit(1735069956.674:1968)',
+        ]
 
     def test_multiple_events(self):
         events = []
