@@ -177,7 +177,7 @@ AuparseContext_init(AuparseContextObject *self, PyObject *args, PyObject *kwds)
 	static char *kwlist[] = {"callback", NULL};
 	PyObject *callback = NULL;
 
-	/* Bug 2 fix: reinitialisation — clean up previous state first */
+	/* Guard against __init__ being invoked more than once: release prior state. */
 	if (self->au != NULL) {
 		auparse_destroy(self->au);
 		self->au = NULL;

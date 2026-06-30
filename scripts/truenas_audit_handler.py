@@ -25,7 +25,6 @@ from truenas_audit_parse import (
     audit_entry_to_json, classify_event,
 )
 from truenas_audit_parse.constants import AUDITD_LINE_SEPARATOR
-from truenas_audit_parse.event_types import AuditMsgEventType
 
 
 DESCRIPTION = (
@@ -46,6 +45,15 @@ SYSLOG_IDENT = 'TNAUDIT_SYSTEM: '
 ENTERPRISE_CHECK_TIMEOUT = 60    # seconds to retry initial middlewared connection
 ENTERPRISE_CHECK_INTERVAL = 2    # seconds between retries during initial check
 ENTERPRISE_RECHECK_INTERVAL = 300  # seconds between polls in the CE no-op loop
+
+# Bound each socket read so the daemon can flush libauparse's feed buffer when
+# the audit stream goes idle. libauparse holds some event types (single-record
+# LOGIN/TTY events, and any event not yet followed by another) in its feed
+# buffer until more input arrives, so without a periodic flush those events
+# would be delivered late or lost when auditd stops. The interval is far larger
+# than the sub-millisecond gap between records of a single event, so a flush
+# never splits a multi-record event.
+FLUSH_TIMEOUT = 1.0  # seconds
 
 # TODO: generate critical middleware alert if our backlog starts to hit
 # critical levels
@@ -301,6 +309,9 @@ class AuditdHandler:
 
     def terminate(self):
         diag_logger.info("Received termination signal, shutting down audit handler")
+        # Flush any event still buffered in libauparse into the logging pipeline
+        # before we persist the pending queue to the recovery file.
+        self.__flush_auparse()
         # By this point our logger has shut down, but we may have a queue.
         self.__write_recovery_file()
 
@@ -322,26 +333,30 @@ class AuditdHandler:
 
     def _on_event_ready(self, event: dict):
         """Called synchronously from C callback when a complete event is assembled."""
-        msgid = event.get('msgid', '')
+        msgid = event.get('msgid')
+        if not msgid:
+            diag_logger.warning("Audit event assembled without a msgid; dropping it")
+            return
+
         raw_lines = event.get('raw_lines', [])
         event_type = classify_event(event)
 
-        key_event_parts = None
-        for record in event.get('records', []):
-            if record.get('type_name') == AuditMsgEventType.SYSCALL:
-                key = record.get('fields', {}).get('key')
-                if key and key not in ('(null)', '(none)', '?', 'unset'):
-                    # Find matching raw line for key_event_parts
-                    for raw_line in raw_lines:
-                        if raw_line.startswith(f'type={AuditMsgEventType.SYSCALL} '):
-                            key_event_parts = raw_line.split()
-                            break
-                break
-
-        json_data = audit_entry_to_json(
-            msgid, event_type, raw_lines, key_event_parts, parsed=event
-        )
+        json_data = audit_entry_to_json(msgid, event_type, raw_lines, parsed=event)
         self.logger.critical(json_data)
+
+    def __flush_auparse(self):
+        """Flush libauparse's feed buffer, emitting any fully-assembled event.
+
+        libauparse holds some events in its feed buffer until more input
+        arrives (see FLUSH_TIMEOUT). Flushing on idle and at shutdown ensures
+        those events are delivered instead of being delayed indefinitely or
+        lost when auditd stops. The flush invokes _on_event_ready synchronously
+        for any buffered event.
+        """
+        try:
+            self.auparse_ctx.flush()
+        except Exception:
+            diag_logger.exception("Failed to flush auparse context.")
 
     async def parse_audit_line(self, line: bytes):
         try:
@@ -361,8 +376,18 @@ class AuditdHandler:
             diag_logger.exception("Failed to feed line to auparse context.")
 
     async def handle_auditd_msg(self):
-        # Auditd messages are newline-terminated
-        data = await self.audis_reader.readline()
+        # Auditd messages are newline-terminated. Bound the read so that when the
+        # stream goes idle we flush libauparse, which buffers some event types
+        # (LOGIN, TTY, generic records) until the next record arrives.
+        try:
+            data = await asyncio.wait_for(self.audis_reader.readline(), FLUSH_TIMEOUT)
+        except asyncio.TimeoutError:
+            # A timeout means no complete line was available; any partial line
+            # remains in the reader's buffer for the next read, so flushing here
+            # cannot truncate an in-flight record.
+            self.__flush_auparse()
+            return
+
         await self.parse_audit_line(data)
 
         # Monitor pending queue depth and warn if getting high
@@ -390,6 +415,10 @@ class AuditdHandler:
             await self.handle_auditd_msg()
 
         diag_logger.warning("EOF received from audispd socket, stopping main loop")
+
+        # Emit any event libauparse is still buffering before tearing down so
+        # the final event of the session is not lost when auditd stops.
+        self.__flush_auparse()
 
         # It's possible that auditd has stopped and syslog-ng isn't in
         # a good state. Write out the recovery file and hope for happier

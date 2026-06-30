@@ -2,7 +2,6 @@
 # Copyright (C) TrueNAS, 2026
 
 import json
-import pytest
 from truenas_audit_parse.formatter import parse_msgid, audit_entry_to_json
 from truenas_audit_parse.event_types import AuditEvent
 
@@ -63,19 +62,21 @@ class TestAuditEntryToJson:
         assert 'event_data' in tnaudit
 
     def test_event_data_is_json_string(self):
-        # key_event_parts triggers audit_msg_id_str inclusion
-        syscall_parts = SAMPLE_SYSCALL.split()
+        # Non single-record events (e.g. keyed SYSCALL) carry audit_msg_id_str
+        # and the fixed key superset, with raw_lines collapsed to None.
         result = audit_entry_to_json(
             SAMPLE_MSGID,
             AuditEvent.ESCALATION,
             [SAMPLE_SYSCALL],
-            key_event_parts=syscall_parts,
         )
         payload = json.loads(result[5:])
         # event_data should be a JSON string (double-encoded)
         event_data = json.loads(payload['TNAUDIT']['event_data'])
         assert isinstance(event_data, dict)
         assert 'audit_msg_id_str' in event_data
+        assert event_data['raw_lines'] is None
+        # The old handler's fixed superset is always present for these events.
+        assert set(event_data) >= {'syscall', 'cwd', 'proctitle', 'paths'}
 
     def test_null_event_type(self):
         result = audit_entry_to_json(
@@ -85,3 +86,16 @@ class TestAuditEntryToJson:
         )
         payload = json.loads(result[5:])
         assert 'event' in payload['TNAUDIT']
+
+    def test_generic_event_retains_raw_lines(self):
+        # A generic event with no SYSCALL record keeps the raw record text in
+        # event_data['raw_lines'] (matching the old handler), rather than None.
+        config_change = (
+            'type=CONFIG_CHANGE msg=audit(1734547436.320:852): '
+            'op=add_rule key="time-change" list=4 res=1'
+        )
+        result = audit_entry_to_json(SAMPLE_MSGID, None, [config_change])
+        event_data = json.loads(json.loads(result[5:])['TNAUDIT']['event_data'])
+        assert event_data['raw_lines'] == [config_change]
+        assert event_data['syscall'] is None
+        assert 'audit_msg_id_str' in event_data

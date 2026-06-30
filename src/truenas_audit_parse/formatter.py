@@ -9,10 +9,15 @@ from uuid import UUID
 from .constants import AUDITD_NULL_VALUES, JSON_NULL
 from .event_types import AuditEvent, AuditMsgEventType
 from .parsers import (
-    classify_event,
     parse_multipart_event,
     RECORD_PROCESSORS,
 )
+
+# Events the old handler represented with a dedicated single-record parser;
+# their event_data carried only their own parsed fields (no audit_msg_id_str /
+# raw_lines / proctitle / syscall / cwd / paths superset). Values match the
+# upper-cased AuditEvent names emitted in the 'event' field.
+_SINGLE_RECORD_EVENTS = frozenset({'LOGIN', 'SERVICE', 'CREDENTIAL', 'TTY_RECORD'})
 
 
 def parse_msgid(msgid: str) -> tuple[str, str]:
@@ -44,8 +49,6 @@ def parse_msgid(msgid: str) -> tuple[str, str]:
 def _generate_event_data(
     parsed: dict,
     event_type: AuditEvent,
-    raw_lines: list[str],
-    key_event_parts: list[str] | None,
 ) -> dict:
     """Build TNAUDIT event_data dict from parsed records.
 
@@ -124,15 +127,6 @@ def _generate_event_data(
             case _:
                 pass
 
-    # If we have a key_event (SYSCALL with key) and no user yet, extract from it
-    if key_event_parts and not user:
-        for record in parsed.get('records', []):
-            if record.get('type_name') == AuditMsgEventType.SYSCALL:
-                uid_str = record.get('fields', {}).get('UID')
-                if uid_str:
-                    user = uid_str
-                break
-
     return {
         'event': event.upper() if isinstance(event, str) else str(event).upper(),
         'event_data': event_data,
@@ -146,7 +140,6 @@ def audit_entry_to_json(
     msgid: str,
     event_type: AuditEvent | None,
     raw_lines: list[str],
-    key_event_parts: list[str] | None = None,
     parsed: dict | None = None,
 ) -> str:
     """Build TNAUDIT JSON string from audit entry data.
@@ -155,7 +148,6 @@ def audit_entry_to_json(
         msgid: The audit message ID string (e.g., 'audit(1734419821.939:3615)')
         event_type: The classified event type, or None for generic
         raw_lines: Raw audit message lines
-        key_event_parts: Split parts of the key SYSCALL line, if any
         parsed: Pre-parsed event dict (if None, raw_lines will be parsed)
 
     Returns:
@@ -165,15 +157,26 @@ def audit_entry_to_json(
 
     if parsed is None:
         parsed = parse_multipart_event(raw_lines)
-    generated = _generate_event_data(parsed, event_type, raw_lines, key_event_parts)
+    generated = _generate_event_data(parsed, event_type)
 
     event_data_dict = generated['event_data']
 
-    # Old handler: only events with a keyed SYSCALL (key_event set) had
-    # audit_msg_id_str and raw_lines=None in event_data.
-    if key_event_parts is not None:
+    # Reproduce the old handler's event_data schema. The single-record PAM /
+    # LOGIN / SERVICE / TTY events carried only their own parsed fields. Every
+    # other event (keyed-SYSCALL and generic) carried a fixed superset of keys
+    # plus audit_msg_id_str, with raw_lines collapsed to None whenever the event
+    # contained a SYSCALL record and otherwise holding the raw record text.
+    if generated['event'] not in _SINGLE_RECORD_EVENTS:
+        has_syscall = any(
+            record.get('type_name') == AuditMsgEventType.SYSCALL
+            for record in parsed.get('records', [])
+        )
+        event_data_dict.setdefault('proctitle', None)
+        event_data_dict.setdefault('syscall', None)
+        event_data_dict.setdefault('cwd', None)
+        event_data_dict.setdefault('paths', [])
         event_data_dict['audit_msg_id_str'] = msgid
-        event_data_dict['raw_lines'] = None
+        event_data_dict['raw_lines'] = None if has_syscall else raw_lines
 
     to_write = {'TNAUDIT': {
         'aid': aid,

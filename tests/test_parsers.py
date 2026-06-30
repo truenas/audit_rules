@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) TrueNAS, 2026
 
-import pytest
 from truenas_audit_parse.parsers import (
     classify_event,
     parse_multipart_event,
