@@ -6,6 +6,7 @@ import enum
 import logging
 import logging.handlers
 import os
+import re
 import signal
 import stat
 
@@ -33,6 +34,8 @@ SYSLOG_IDENT = 'TNAUDIT_SYSTEM: '
 AUDITD_LINE_SEPARATOR = '\x1d'
 AUDITD_NULL_VALUES = frozenset(['(null)', '(none)', '?', 'unset'])
 JSON_NULL = 'null'
+
+PAM_SPLIT_PATTERN = re.compile(r'(?=\b(?:grantors|acct|exe|hostname|addr|terminal|res|UID|AUID|ID|GID)=)')
 
 # TODO: generate critical middleware alert if our backlog starts to hit
 # critical levels
@@ -429,27 +432,70 @@ def __parse_tty(msg_parts: list, event_data: dict) -> dict:
     return event_data
 
 
-def __parse_pam(msg_type: str, msg_parts: list) -> dict:
+def __parse_pam(msg_type: str, raw_msg: str, msg_parts: list) -> dict:
+    """Parse audit messages related to PAM.
+    These include message types:
+    'USER_START' | 'USER_END' | 'USER_ACCT' | 'USER_AUTH' | 'USER_LOGIN' | 'USER_ERR' |
+    'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP'
+
+    Like all auditd messages, PAM messages start with a 'fixed' set of key=value pairs
+    and end with a variable set.
+
+    The delineator between the 'fixed' and 'variable' is a field that starts with `msg='op=`.
+    The processing of that field is handled by AuditMsgPamBase, the 'fixed field'
+    processor for PAM messages.
+
+    The remaining 'variable' fields are processed in this function."""
+
     event_data = {'event_type': AuditEvent.CREDENTIAL.upper(), 'auth_action': msg_type}
 
     for item in AuditMsgPamBase:
         key, value = item.get_entry(msg_parts)
         event_data[key] = value
 
-    # Everything after pam function is variable
-    for item in msg_parts[AuditMsgPamBase.FUNCTION.idx + 1:]:
+    # Extract op_msg from raw string - everything after the function field
+    function_part = msg_parts[AuditMsgPamBase.FUNCTION.idx]
+    function_idx = raw_msg.find(function_part)
+
+    if function_idx == -1:
+        return event_data
+
+    # Extract variable section from raw message
+    op_msg_start = function_idx + len(function_part)
+    op_msg = raw_msg[op_msg_start:].strip()
+
+    # Use regex to split on known field names - preserves spaces within values
+    # Include UID, AUID, ID, GID to capture fields after the closing quote
+    variable_parts = PAM_SPLIT_PATTERN.split(op_msg)
+
+    # Clean up: remove empty strings and strip whitespace
+    variable_parts = [part.strip() for part in variable_parts if part.strip()]
+
+    # Process each key=value pair
+    for item in variable_parts:
+        if '=' not in item:
+            continue
+
+        # Split on first '=' only
         key, value = item.split('=', 1)
 
-        if value[0] == '"':
-            value = value[1:]
-        if value[-1] == '"':
-            value = value[:-1]
+        # Strip quotes if present (both double quotes and single quotes)
+        if value:
+            if value[0] == '"':
+                value = value[1:]
+            if value[-1] == '"':
+                value = value[:-1]
+            # Strip trailing single quote from closing msg quote (e.g., "success'" -> "success")
+            if value[-1] == "'":
+                value = value[:-1]
 
+        # Convert to appropriate type
         if value.isdigit():
             value = int(value)
         elif value in AUDITD_NULL_VALUES:
             value = None
 
+        # Handle special keys
         match key:
             case 'res':
                 value = value.startswith('success')
@@ -487,9 +533,9 @@ def __parse_raw_msg(msg: str, event_data: dict):
         case 'SERVICE_START' | 'SERVICE_STOP':
             return __parse_service(msg_type, parts)
         case 'USER_START' | 'USER_END' | 'USER_ACCT' | 'USER_AUTH' | 'USER_LOGIN' | 'USER_ERR':
-            return __parse_pam(msg_type, parts)
+            return __parse_pam(msg_type, msg, parts)
         case 'CRED_ACQ' | 'CRED_REFR' | 'CRED_DISP':
-            return __parse_pam(msg_type, parts)
+            return __parse_pam(msg_type, msg, parts)
         case 'TTY':
             return __parse_tty(parts, event_data)
         case _:
