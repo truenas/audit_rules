@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) TrueNAS, 2026
 
-from datetime import datetime
+from datetime import datetime, timezone
 from json import dumps
 from random import getrandbits
 from uuid import UUID
@@ -34,7 +34,7 @@ def parse_msgid(msgid: str) -> tuple[str, str]:
     """
     inner = msgid.split('(')[1].strip(')')
     timestamp, eventid = inner.split(':')
-    ts_datetime = datetime.fromtimestamp(float(timestamp))
+    ts_datetime = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
 
     upper_64 = int(timestamp.replace('.', '')) << 64
     lower_32 = int(eventid)
