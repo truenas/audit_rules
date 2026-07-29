@@ -2,11 +2,32 @@
 # Copyright (C) TrueNAS, 2026
 
 import json
+import os
+import time
+from contextlib import contextmanager
+
 from truenas_audit_parse.formatter import parse_msgid, audit_entry_to_json
 from truenas_audit_parse.event_types import AuditEvent
 
 
 SAMPLE_MSGID = 'audit(1734547436.320:852)'
+SAMPLE_TIME_UTC = '2024-12-18 18:43:56.320000'
+
+
+@contextmanager
+def local_timezone(name):
+    """Run the enclosed block with a specific local timezone."""
+    previous = os.environ.get('TZ')
+    os.environ['TZ'] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = previous
+        time.tzset()
 
 SAMPLE_SYSCALL = (
     'type=SYSCALL msg=audit(1734547436.320:852): arch=c000003e syscall=59 '
@@ -34,14 +55,21 @@ class TestParseMsgid:
         # Should be a valid UUID string
         assert len(aid) == 36
         assert aid.count('-') == 4
-        # Should contain a reasonable timestamp
-        assert '2024-12-18' in time_str
+        # time is the UTC render of the auditd epoch timestamp
+        assert time_str == SAMPLE_TIME_UTC
 
     def test_uuid_uniqueness(self):
         # Random bits should make each call produce a different UUID
         aid1, _ = parse_msgid(SAMPLE_MSGID)
         aid2, _ = parse_msgid(SAMPLE_MSGID)
         assert aid1 != aid2
+
+    def test_time_is_utc_independent_of_local_timezone(self):
+        # The 'time' field must be UTC regardless of the daemon's local timezone.
+        for tz in ('Asia/Tokyo', 'America/Los_Angeles', 'UTC'):
+            with local_timezone(tz):
+                _aid, time_str = parse_msgid(SAMPLE_MSGID)
+                assert time_str == SAMPLE_TIME_UTC, tz
 
 
 class TestAuditEntryToJson:
