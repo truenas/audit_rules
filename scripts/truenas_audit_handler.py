@@ -9,14 +9,12 @@ import logging.handlers
 import os
 import signal
 import stat
-import time
-
-from truenas_api_client import Client
 
 from collections import deque
 from middlewared.logger import (
     TNSyslogHandler, TNLog, DEFAULT_LOGFORMAT, AUDIT_HANDLER_LOGFILE, QFORMATTER
 )
+from middlewared.utils.hardware import get_hardware_class
 import socket
 from queue import Queue
 
@@ -41,10 +39,6 @@ DEFAULT_RECOVERY_FILE = '/var/run/middleware/.auditd_handler.recovery'
 diag_logger = None
 DEFAULT_DIAG_SYSLOG_SOCK = '/dev/log'
 SYSLOG_IDENT = 'TNAUDIT_SYSTEM: '
-
-ENTERPRISE_CHECK_TIMEOUT = 60    # seconds to retry initial middlewared connection
-ENTERPRISE_CHECK_INTERVAL = 2    # seconds between retries during initial check
-ENTERPRISE_RECHECK_INTERVAL = 300  # seconds between polls in the CE no-op loop
 
 # Bound each socket read so the daemon can flush libauparse's feed buffer when
 # the audit stream goes idle. libauparse holds some event types (single-record
@@ -426,54 +420,44 @@ class AuditdHandler:
         await self.loop.run_in_executor(None, self.__write_recovery_file)
 
 
-def _is_enterprise() -> bool | None:
-    """Single attempt to check enterprise status. Returns None on any error."""
+def _should_handle_audit_events() -> bool:
+    """
+    Kernel audit events are only ingested into the audit database on iX
+    hardware, excluding Minis. This reads the chassis rather than the license,
+    so no answer here depends on middlewared or the license daemon being up.
+
+    A detection failure is deliberately treated as "yes": an audit trail that
+    is silently missing is worse than one collected on a machine that did not
+    need it.
+    """
     try:
-        with Client() as c:
-            return c.call('system.is_enterprise')
+        hardware_class = get_hardware_class()
     except Exception:
-        return None
-
-
-def _wait_for_enterprise_on_startup() -> bool:
-    """
-    Retries enterprise check until middlewared responds or timeout expires.
-    Returns True (enterprise), False (CE), defaults to False on timeout.
-    """
-    deadline = time.monotonic() + ENTERPRISE_CHECK_TIMEOUT
-    while time.monotonic() < deadline:
-        result = _is_enterprise()
-        if result is not None:
-            diag_logger.info("Enterprise check: is_enterprise=%r", result)
-            return result
-        diag_logger.debug(
-            "Middlewared not yet available, retrying in %ds", ENTERPRISE_CHECK_INTERVAL
+        diag_logger.exception(
+            "Hardware detection failed. Handling audit events regardless."
         )
-        time.sleep(ENTERPRISE_CHECK_INTERVAL)
+        return True
 
-    diag_logger.warning(
-        "Could not reach middlewared within %ds. Defaulting to CE (no-op).",
-        ENTERPRISE_CHECK_TIMEOUT
+    diag_logger.info(
+        "Detected hardware class %r (appliance=%r)",
+        str(hardware_class), hardware_class.is_appliance
     )
-    return False
+    return hardware_class.is_appliance
 
 
-def _ce_noop_loop() -> None:
+def _idle_forever() -> None:
     """
-    Block indefinitely on CE systems. Polls for a license periodically so
-    that if one is installed the handler activates without a manual restart.
-    Returns when system.is_enterprise becomes True.
+    Block without exiting on hardware that does not ingest audit events.
+
+    The auditd unit upholds this service, so exiting would simply have systemd
+    restart us immediately, in a tight loop. Nothing is polled because the
+    chassis cannot change while the system is running.
     """
     diag_logger.info(
-        "Community Edition — kernel audit handler disabled. "
-        "Polling every %ds for enterprise license.", ENTERPRISE_RECHECK_INTERVAL
+        "Not appliance hardware — kernel audit event handling is disabled."
     )
     while True:
-        time.sleep(ENTERPRISE_RECHECK_INTERVAL)
-        result = _is_enterprise()
-        if result is True:
-            diag_logger.info("Enterprise license detected. Starting audit handler.")
-            return
+        signal.pause()
 
 
 def __process_args() -> argparse.Namespace:
@@ -515,9 +499,8 @@ def main():
     # Set up module-level diagnostic logger before creating handler
     setup_diagnostic_logger()
 
-    if not _wait_for_enterprise_on_startup():
-        _ce_noop_loop()
-        # Falls through here only when a license is installed mid-run
+    if not _should_handle_audit_events():
+        _idle_forever()
 
     loop = asyncio.new_event_loop()
     handler = AuditdHandler(
