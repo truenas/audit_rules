@@ -22,7 +22,7 @@ from queue import Queue
 
 import truenas_auparse
 from truenas_audit_parse import (
-    audit_entry_to_json, classify_event,
+    AuditEvent, audit_entry_to_json, classify_event,
 )
 from truenas_audit_parse.constants import AUDITD_LINE_SEPARATOR
 
@@ -41,6 +41,10 @@ DEFAULT_RECOVERY_FILE = '/var/run/middleware/.auditd_handler.recovery'
 diag_logger = None
 DEFAULT_DIAG_SYSLOG_SOCK = '/dev/log'
 SYSLOG_IDENT = 'TNAUDIT_SYSTEM: '
+# The S3 daemon's records are their own audited service: syslog-ng
+# routes on the program name, so they carry their own ident and land in
+# the S3 database once middleware registers the service.
+SYSLOG_IDENT_S3 = 'TNAUDIT_S3: '
 
 ENTERPRISE_CHECK_TIMEOUT = 60    # seconds to retry initial middlewared connection
 ENTERPRISE_CHECK_INTERVAL = 2    # seconds between retries during initial check
@@ -244,36 +248,48 @@ class AuditdHandler:
         self.exit = False
         self.loop = loop
         self.logger = None  # Audit event logger (writes JSON audit events)
+        self.s3_logger = None  # Same, under the S3 service's ident
         self.syslog_handler = None
         self.audis_path = audis_sock
         self.syslog_path = syslog_sock
         self.recovery_file = recovery_file
         self.syslog_queue_listener = None
+        self.s3_queue_listener = None
         self.diag_queue_listener = None
         self.audis_reader = None
         self.audis_writer = None
         self.pending_queue = deque()
-        self.__setup_logger()
+        self.__setup_loggers()
         self.auparse_ctx = truenas_auparse.AuparseContext(callback=self._on_event_ready)
         self.__read_recovery_file()
 
-    def __setup_logger(self) -> logging.Logger:
-        # Set up logging queue to make sending messages to syslog nonblocking
+    def __setup_audit_logger(
+        self, name: str, ident: str
+    ) -> tuple[logging.Logger, logging.handlers.QueueListener]:
+        # Set up logging queue to make sending messages to syslog nonblocking.
+        # Both audit loggers share one pending queue, so the recovery file
+        # holds every undelivered event whichever service it belongs to.
         logq = Queue()
         queue_handler = logging.handlers.QueueHandler(logq)
         queue_handler.setLevel(logging.DEBUG)
         audit_handler = TNSyslogHandler(self.syslog_path, self.pending_queue)
         audit_handler.setLevel(logging.DEBUG)
-        audit_handler.ident = SYSLOG_IDENT
+        audit_handler.ident = ident
 
         # Syslog messages are sent in separate thread
         queue_listener = logging.handlers.QueueListener(logq, audit_handler)
         queue_listener.start()
-        logger = logging.getLogger('AuditLogger')
+        logger = logging.getLogger(name)
         logger.addHandler(queue_handler)
-        self.logger = logger
-        self.syslog_hander = audit_handler
-        self.syslog_queue_listener = queue_listener
+        return logger, queue_listener
+
+    def __setup_loggers(self) -> None:
+        self.logger, self.syslog_queue_listener = self.__setup_audit_logger(
+            'AuditLogger', SYSLOG_IDENT
+        )
+        self.s3_logger, self.s3_queue_listener = self.__setup_audit_logger(
+            'AuditLoggerS3', SYSLOG_IDENT_S3
+        )
 
     def __write_recovery_file(self):
         queue_len = len(self.pending_queue)
@@ -300,8 +316,14 @@ class AuditdHandler:
         msg_count = 0
         with open(self.recovery_file, 'r') as f:
             for line in f:
-                # immediately emit events in recovery file
-                self.logger.critical(line)
+                # Immediately emit events in the recovery file, under
+                # the ident of the service each belongs to — the file
+                # holds finished JSON, so the service is read back out
+                # of it rather than re-derived.
+                if '"svc": "S3"' in line:
+                    self.s3_logger.critical(line)
+                else:
+                    self.logger.critical(line)
                 msg_count += 1
 
         os.unlink(self.recovery_file)
@@ -342,7 +364,10 @@ class AuditdHandler:
         event_type = classify_event(event)
 
         json_data = audit_entry_to_json(msgid, event_type, raw_lines, parsed=event)
-        self.logger.critical(json_data)
+        if event_type == AuditEvent.S3:
+            self.s3_logger.critical(json_data)
+        else:
+            self.logger.critical(json_data)
 
     def __flush_auparse(self):
         """Flush libauparse's feed buffer, emitting any fully-assembled event.

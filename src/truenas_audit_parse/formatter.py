@@ -12,6 +12,7 @@ from .parsers import (
     parse_multipart_event,
     RECORD_PROCESSORS,
 )
+from .s3 import s3_entry_to_json
 
 # Events the old handler represented with a dedicated single-record parser;
 # their event_data carried only their own parsed fields (no audit_msg_id_str /
@@ -153,10 +154,15 @@ def audit_entry_to_json(
     Returns:
         '@cee:' prefixed JSON string for syslog
     """
-    aid, time_str = parse_msgid(msgid)
-
     if parsed is None:
         parsed = parse_multipart_event(raw_lines)
+
+    # The S3 daemon's records are their own service with their own
+    # envelope mapping; nothing of the SYSTEM schema below applies.
+    if event_type == AuditEvent.S3:
+        return s3_entry_to_json(msgid, parsed)
+
+    aid, time_str = parse_msgid(msgid)
     generated = _generate_event_data(parsed, event_type)
 
     event_data_dict = generated['event_data']
