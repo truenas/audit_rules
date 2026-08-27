@@ -27,26 +27,45 @@ from json import dumps
 
 from .constants import S3_MSG_TYPES, S3_OP_PREFIX
 
-S3_SERVICE = 'S3'
-S3_VERS = {'major': 0, 'minor': 1}
+S3_SERVICE = "S3"
+S3_VERS = {"major": 0, "minor": 1}
 
 # The producer's variable-length string fields, in the order the record
 # defines them. Values were libaudit-encoded on the wire and are decoded
 # through _decoded() below.
 _STR_FIELDS = (
-    'req', 'keyid', 'bucket', 'obj', 'ver', 'err',
-    'range', 'src_bucket', 'src_obj', 'src_ver',
-    'upload', 'prefix',
+    "req",
+    "keyid",
+    "bucket",
+    "obj",
+    "ver",
+    "err",
+    "range",
+    "src_bucket",
+    "src_obj",
+    "src_ver",
+    "upload",
+    "prefix",
 )
 
 # Numeric fields. libaudit encoding quotes them like any clean value.
 _INT_FIELDS = (
-    'acct_uid', 'status', 'bytes_in', 'bytes_out', 'size',
-    'part', 'parts', 'deleted', 'denied', 'errors', 'n', 'truncated',
+    "acct_uid",
+    "status",
+    "bytes_in",
+    "bytes_out",
+    "size",
+    "part",
+    "parts",
+    "deleted",
+    "denied",
+    "errors",
+    "n",
+    "truncated",
 )
 
 # Flag fields the producer emits only when true (as "1").
-_FLAG_FIELDS = ('marker', 'clipped')
+_FLAG_FIELDS = ("marker", "clipped")
 
 
 def s3_record(parsed: dict) -> dict | None:
@@ -56,10 +75,10 @@ def s3_record(parsed: dict) -> dict | None:
     company: the first record carrying the op=s3d: vocabulary in one of
     the four types s3d originates is the one.
     """
-    for record in parsed.get('records', []):
-        if record.get('type_name') not in S3_MSG_TYPES:
+    for record in parsed.get("records", []):
+        if record.get("type_name") not in S3_MSG_TYPES:
             continue
-        if record.get('fields', {}).get('op', '').startswith(S3_OP_PREFIX):
+        if record.get("fields", {}).get("op", "").startswith(S3_OP_PREFIX):
             return record
     return None
 
@@ -78,12 +97,12 @@ def _decoded(fields: dict, raw_fields: dict, key: str) -> str | None:
     value = fields.get(key)
     if value is None:
         return None
-    raw = raw_fields.get(key, '')
+    raw = raw_fields.get(key, "")
     if raw.startswith('"'):
         return value
     if len(value) % 2 == 0 and value:
         try:
-            return binascii.unhexlify(value).decode('utf-8', 'replace')
+            return binascii.unhexlify(value).decode("utf-8", "replace")
         except (binascii.Error, ValueError):
             pass
     return value
@@ -96,14 +115,14 @@ def _s3_time(fields: dict, fallback: str) -> str:
     framework's own stamp is send time, and the difference is queue
     delay. Fall back to the message id's timestamp when absent.
     """
-    ts = fields.get('ts')
+    ts = fields.get("ts")
     if ts is None:
         return fallback
     try:
         parsed = datetime.fromtimestamp(float(ts), tz=timezone.utc)
     except (ValueError, OverflowError, OSError):
         return fallback
-    return parsed.strftime('%Y-%m-%d %H:%M:%S.%f')
+    return parsed.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
 def _batch_keys(fields: dict, raw_fields: dict) -> list[str]:
@@ -115,10 +134,10 @@ def _batch_keys(fields: dict, raw_fields: dict) -> list[str]:
     """
     numbered = []
     for key in fields:
-        if not key.startswith('obj_'):
+        if not key.startswith("obj_"):
             continue
         try:
-            index = int(key[len('obj_'):])
+            index = int(key[len("obj_") :])
         except ValueError:
             continue
         numbered.append((index, key))
@@ -135,12 +154,12 @@ def process_s3(record: dict) -> dict:
     identity, not the principal's) stay out; the principal is the
     envelope's user.
     """
-    fields = record.get('fields', {})
-    raw_fields = record.get('raw_fields', {})
+    fields = record.get("fields", {})
+    raw_fields = record.get("raw_fields", {})
 
     event_data = {
-        'vers': S3_VERS,
-        'record_type': record.get('type_name'),
+        "vers": S3_VERS,
+        "record_type": record.get("type_name"),
     }
     for key in _STR_FIELDS:
         if key in fields:
@@ -153,10 +172,10 @@ def process_s3(record: dict) -> dict:
                 event_data[key] = None
     for key in _FLAG_FIELDS:
         if key in fields:
-            event_data[key] = fields[key] == '1'
+            event_data[key] = fields[key] == "1"
     keys = _batch_keys(fields, raw_fields)
     if keys:
-        event_data['objs'] = keys
+        event_data["objs"] = keys
 
     return event_data
 
@@ -177,25 +196,27 @@ def s3_entry_to_json(msgid: str, parsed: dict) -> str:
 
     record = s3_record(parsed)
     if record is None:
-        raise ValueError(f'{msgid}: not an s3d event')
-    fields = record.get('fields', {})
-    raw_fields = record.get('raw_fields', {})
+        raise ValueError(f"{msgid}: not an s3d event")
+    fields = record.get("fields", {})
+    raw_fields = record.get("raw_fields", {})
 
     aid, msgid_time = parse_msgid(msgid)
-    verb = fields.get('op', '')[len(S3_OP_PREFIX):]
+    verb = fields.get("op", "")[len(S3_OP_PREFIX) :]
 
-    to_write = {'TNAUDIT': {
-        'aid': aid,
-        'vers': S3_VERS,
-        'addr': _decoded(fields, raw_fields, 'addr') or '127.0.0.1',
-        'user': _decoded(fields, raw_fields, 'acct'),
-        'sess': None,
-        'time': _s3_time(fields, msgid_time),
-        'svc': S3_SERVICE,
-        'svc_data': dumps({'vers': S3_VERS}),
-        'event': verb,
-        'event_data': dumps(process_s3(record)),
-        'success': fields.get('res') == 'success',
-    }}
+    to_write = {
+        "TNAUDIT": {
+            "aid": aid,
+            "vers": S3_VERS,
+            "addr": _decoded(fields, raw_fields, "addr") or "127.0.0.1",
+            "user": _decoded(fields, raw_fields, "acct"),
+            "sess": None,
+            "time": _s3_time(fields, msgid_time),
+            "svc": S3_SERVICE,
+            "svc_data": dumps({"vers": S3_VERS}),
+            "event": verb,
+            "event_data": dumps(process_s3(record)),
+            "success": fields.get("res") == "success",
+        }
+    }
 
-    return '@cee:' + dumps(to_write)
+    return "@cee:" + dumps(to_write)
