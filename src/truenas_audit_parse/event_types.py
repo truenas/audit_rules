@@ -28,6 +28,10 @@ class AuditMsgEventType(enum.StrEnum):
     # Service record types
     SERVICE_START = 'SERVICE_START'
     SERVICE_STOP = 'SERVICE_STOP'
+    # Trusted-application record types (the TrueNAS S3 daemon emits its
+    # audit trail as these, plus USER_AUTH / USER_ACCT above)
+    TRUSTED_APP = 'TRUSTED_APP'
+    DAC_CHECK = 'DAC_CHECK'
 
 
 class AuditEvent(enum.StrEnum):
@@ -43,3 +47,7 @@ class AuditEvent(enum.StrEnum):
     SERVICE = 'service'
     CREDENTIAL = 'credential'
     TTY_RECORD = 'tty_record'
+    # The TrueNAS S3 daemon's own records, recognized by their
+    # op=s3d:<Operation> vocabulary and emitted as their own service
+    # rather than folded into the SYSTEM trail
+    S3 = 's3'

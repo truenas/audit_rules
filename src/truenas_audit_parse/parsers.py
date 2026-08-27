@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 from .constants import AUDITD_NULL_VALUES, PAM_MSG_TYPES, SERVICE_MSG_TYPES
 from .event_types import AuditEvent, AuditMsgEventType
+from .s3 import s3_record
 
 
 def parse_multipart_event(raw_lines: list[str]) -> dict:
@@ -24,8 +25,14 @@ def classify_event(parsed: dict) -> AuditEvent:
     """Determine the AuditEvent type from parsed records.
 
     Reads the 'key' field from SYSCALL records, or determines type from
-    LOGIN, SERVICE, PAM, or TTY records.
+    LOGIN, SERVICE, PAM, or TTY records. The S3 daemon's records are
+    recognized first, by their op=s3d: vocabulary — two of its four
+    types are shared with PAM, and an s3d USER_AUTH must not be read as
+    a credential event with its S3 fields dropped.
     """
+    if s3_record(parsed) is not None:
+        return AuditEvent.S3
+
     for record in parsed.get('records', []):
         type_name = record.get('type_name', '')
         fields = record.get('fields', {})
