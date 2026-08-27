@@ -16,5 +16,5 @@ Homepage: http://www.truenas.com
 
 Package: truenas-audit-rules
 Architecture: any
-Depends: python3:any, truenas-files, ${misc:Depends}, ${shlibs:Depends}, ${python3:Depends}
+Depends: python3:any, middlewared, truenas-files, ${misc:Depends}, ${shlibs:Depends}, ${python3:Depends}
 Description: Auditd rules and audit event handler for TrueNAS
