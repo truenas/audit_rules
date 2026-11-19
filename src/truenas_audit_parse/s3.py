@@ -46,6 +46,8 @@ _STR_FIELDS = (
     "src_ver",
     "upload",
     "prefix",
+    "lock_mode",
+    "legal_hold",
 )
 
 # Numeric fields. libaudit encoding quotes them like any clean value.
@@ -62,10 +64,11 @@ _INT_FIELDS = (
     "errors",
     "n",
     "truncated",
+    "retain_until",
 )
 
 # Flag fields the producer emits only when true (as "1").
-_FLAG_FIELDS = ("marker", "clipped")
+_FLAG_FIELDS = ("marker", "clipped", "bypass")
 
 
 def s3_record(parsed: dict) -> dict | None:
@@ -125,8 +128,9 @@ def _s3_time(fields: dict, fallback: str) -> str:
     return parsed.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
-def _batch_keys(fields: dict, raw_fields: dict) -> list[str]:
-    """The delete batch's numbered obj_N fields, in order.
+def _batch_keys(fields: dict, raw_fields: dict) -> tuple[list[str], list[str | None]]:
+    """The delete batch's numbered obj_N fields, in order, and the
+    ver_N beside each (None where the row named no version).
 
     The producer numbers a field per key because keys may contain any
     byte a list separator could use; here they become the JSON list
@@ -140,9 +144,11 @@ def _batch_keys(fields: dict, raw_fields: dict) -> list[str]:
             index = int(key[len("obj_") :])
         except ValueError:
             continue
-        numbered.append((index, key))
+        numbered.append(index)
     numbered.sort()
-    return [_decoded(fields, raw_fields, key) for _, key in numbered]
+    keys = [_decoded(fields, raw_fields, f"obj_{i}") for i in numbered]
+    versions = [_decoded(fields, raw_fields, f"ver_{i}") for i in numbered]
+    return keys, versions
 
 
 def process_s3(record: dict) -> dict:
@@ -173,9 +179,11 @@ def process_s3(record: dict) -> dict:
     for key in _FLAG_FIELDS:
         if key in fields:
             event_data[key] = fields[key] == "1"
-    keys = _batch_keys(fields, raw_fields)
+    keys, versions = _batch_keys(fields, raw_fields)
     if keys:
         event_data["objs"] = keys
+        if any(v is not None for v in versions):
+            event_data["obj_vers"] = versions
 
     return event_data
 
