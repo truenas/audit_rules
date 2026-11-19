@@ -59,6 +59,46 @@ SAMPLE_S3_BATCH = (
     'obj_2=636166C3A9 truncated="2" res=success\''
 )
 
+# Object Lock records, in the producer's field sets: a delete and a
+# batch spending the GOVERNANCE bypass, a retention set and a hold.
+SAMPLE_S3_BYPASS_DELETE = (
+    "type=TRUSTED_APP msg=audit(1787762901.000:10002): pid=36505 uid=0 "
+    "auid=0 ses=41 subj=unconfined "
+    'msg=\'op=s3d:DeleteObject acct="s3user" acct_uid="3001" '
+    'addr="127.0.0.1:40000" ts="1787762901.000100" req="AAAA1111BBBB3333" '
+    'bucket="vault" obj="a" ver="v1" status="204" bytes_in="0" '
+    'bytes_out="0" bypass="1" res=success\''
+)
+
+SAMPLE_S3_BYPASS_BATCH = (
+    "type=TRUSTED_APP msg=audit(1787762902.000:10003): pid=36505 uid=0 "
+    "auid=0 ses=41 subj=unconfined "
+    'msg=\'op=s3d:DeleteObjects acct="s3user" acct_uid="3001" '
+    'addr="127.0.0.1:40000" ts="1787762902.000100" req="AAAA1111BBBB4444" '
+    'bucket="vault" status="200" bytes_in="200" bytes_out="300" '
+    'deleted="2" denied="0" errors="0" bypass="1" obj_0="a" ver_0="v1" '
+    'obj_1="b" res=success\''
+)
+
+SAMPLE_S3_RETENTION = (
+    "type=TRUSTED_APP msg=audit(1787762903.000:10004): pid=36505 uid=0 "
+    "auid=0 ses=41 subj=unconfined "
+    'msg=\'op=s3d:PutObjectRetention acct="s3user" acct_uid="3001" '
+    'addr="127.0.0.1:40000" ts="1787762903.000100" req="AAAA1111BBBB5555" '
+    'bucket="vault" obj="a" ver="v1" status="200" bytes_in="120" '
+    'bytes_out="0" lock_mode="COMPLIANCE" retain_until="4070908800" '
+    "res=success'"
+)
+
+SAMPLE_S3_HOLD = (
+    "type=TRUSTED_APP msg=audit(1787762904.000:10005): pid=36505 uid=0 "
+    "auid=0 ses=41 subj=unconfined "
+    'msg=\'op=s3d:PutObjectLegalHold acct="s3user" acct_uid="3001" '
+    'addr="127.0.0.1:40000" ts="1787762904.000100" req="AAAA1111BBBB6666" '
+    'bucket="vault" obj="a" ver="v1" status="403" err="AccessDenied" '
+    'bytes_in="60" bytes_out="200" legal_hold="OFF" res=failed\''
+)
+
 # Captured from the same box after the multipart engine landed: one
 # real upload's create, a part, and its completion — the field sets
 # the producer's per-operation table promises for the family.
@@ -230,6 +270,39 @@ class TestS3Envelope:
         # Ordered by index, hex decoded where the producer encoded
         # ('café' carries a byte outside the clean range).
         assert data["objs"] == ["secret/a", "b.txt", "café"]
+
+
+class TestObjectLockFields:
+    def test_a_bypassed_delete_says_so(self):
+        data = json.loads(_tnaudit(SAMPLE_S3_BYPASS_DELETE)["event_data"])
+        assert data["bypass"] is True
+        assert data["ver"] == "v1"
+
+    def test_a_batch_keeps_each_rows_version(self):
+        data = json.loads(_tnaudit(SAMPLE_S3_BYPASS_BATCH)["event_data"])
+        assert data["bypass"] is True
+        assert data["objs"] == ["a", "b"]
+        assert data["obj_vers"] == ["v1", None]
+        assert data["vers"] == {"major": 0, "minor": 1}
+
+    def test_a_batch_without_versions_has_no_obj_vers(self):
+        data = json.loads(_tnaudit(SAMPLE_S3_BATCH)["event_data"])
+        assert "obj_vers" not in data
+
+    def test_a_retention_set_carries_mode_and_date(self):
+        tn = _tnaudit(SAMPLE_S3_RETENTION)
+        assert tn["event"] == "PutObjectRetention"
+        data = json.loads(tn["event_data"])
+        assert data["lock_mode"] == "COMPLIANCE"
+        assert data["retain_until"] == 4070908800
+        assert "bypass" not in data
+
+    def test_a_refused_hold_release_carries_the_state_asked(self):
+        tn = _tnaudit(SAMPLE_S3_HOLD)
+        assert tn["event"] == "PutObjectLegalHold"
+        data = json.loads(tn["event_data"])
+        assert data["legal_hold"] == "OFF"
+        assert data["err"] == "AccessDenied"
 
 
 class TestProcessS3:
